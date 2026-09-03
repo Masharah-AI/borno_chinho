@@ -1,0 +1,30 @@
+name: Deploy borno_chinho
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-borno
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, ocr-vm, borno]
+    steps:
+      - name: Pull latest and redeploy
+        run: |
+          set -euo pipefail
+          cd "$HOME/borno_chinho"
+          git fetch origin master
+          git reset --hard origin/master
+          venv/bin/pip install -q -r requirements.txt
+          sudo systemctl restart borno_chinho
+          sleep 3
+          code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' http://127.0.0.1:2828/ || echo 000)
+          echo "borno health: HTTP $code"
+          test "$code" = "200"
+      - name: Prune old runner logs
+        if: always()
+        run: find "$HOME/actions-runner/_diag" -type f -mtime +1 -delete 2>/dev/null || true
