@@ -62,30 +62,47 @@ class Supervisor:
         UI can show it without knowing anything about the rules.
         """
 
+        shape = (
+            "The bounding box (bbox) should be four numbers "
+            "[left, top, right, bottom]"
+        )
+
         if not isinstance(bbox, list):
-            return ["bbox must be a list of four numbers."]
+            return [f"{shape}, but it is not a list."]
 
         if len(bbox) != 4:
-            return [f"bbox needs exactly 4 numbers, but has {len(bbox)}."]
+            counted = "only 1 number" if len(bbox) == 1 else f"{len(bbox)} numbers"
+            return [f"{shape}, but this one has {counted}."]
 
         try:
             coords = [int(coord) for coord in bbox]
         except (TypeError, ValueError):
-            return [f"bbox must hold four numbers, but is {bbox}."]
+            return [f"{shape}, but some of its values are not numbers."]
 
         reasons = []
 
         negative = [str(coord) for coord in coords if coord <= 0]
         if negative:
+            amount = "value" if len(negative) == 1 else "values"
             reasons.append(
-                f"coordinates must be positive, but found {', '.join(negative)}."
+                "Bounding box off the page: every coordinate must be greater "
+                f"than zero, but the {amount} {', '.join(negative)} "
+                f"{'is' if len(negative) == 1 else 'are'} not."
             )
 
         x1, y1, x2, y2 = coords
         if x1 > x2:
-            reasons.append(f"left edge ({x1}) is right of the right edge ({x2}).")
+            reasons.append(
+                "Bounding box is inside out: its left edge "
+                f"({x1}) is to the right of its right edge ({x2}). "
+                "The two may be swapped."
+            )
         if y1 > y2:
-            reasons.append(f"top edge ({y1}) is below the bottom edge ({y2}).")
+            reasons.append(
+                "Bounding box is upside down: its top edge "
+                f"({y1}) is below its bottom edge ({y2}). "
+                "The two may be swapped."
+            )
 
         return reasons
 

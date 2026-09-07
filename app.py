@@ -11,7 +11,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 
 from services.supervisor import Supervisor
 from logger import setup_logging, get_logger
-from config import HOST, PORT
+from config import HOST, PORT, CATEGORIES
 
 setup_logging()
 logger = get_logger("app")
@@ -100,6 +100,31 @@ async def upload_json(uploaded_file: UploadFile=File(...)):
 
 PREVIEW_LENGTH = 90
 
+# What each field IS, for messages aimed at whoever is fixing the file. The
+# literal name is kept alongside the description so the field stays findable
+# in the editor.
+FIELD_LABELS = {
+    "bbox": "the bounding box (bbox)",
+    "category": "the category (category)",
+    "text": "the text content (text)"
+}
+
+
+def label_field(field: str):
+
+    return FIELD_LABELS.get(field, f'"{field}"')
+
+
+def join_fields(fields: List[str]):
+    """Field descriptions as readable prose: "a, b and c"."""
+
+    labels = [label_field(field) for field in fields]
+
+    if len(labels) == 1:
+        return labels[0]
+
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
+
 
 def make_preview(entry: dict):
     """A short, single-line excerpt identifying the entry to a human.
@@ -145,15 +170,30 @@ async def validate_json(data: List[dict]):
             if missing or extra:
                 problems = []
                 if missing:
-                    problems.append(f"missing required key(s): {', '.join(missing)}.")
+                    one = len(missing) == 1
+                    problems.append(
+                        f"Missing {'field' if one else 'fields'}: this entry needs "
+                        f"{join_fields(missing)}, but "
+                        f"{'it is' if one else 'they are'} not there."
+                    )
                 if extra:
-                    problems.append(f"unexpected key(s): {', '.join(extra)}.")
+                    one = len(extra) == 1
+                    category = entry.get("category")
+                    belongs = f"a {category} entry" if isinstance(category, str) else "this entry"
+                    problems.append(
+                        f"Unexpected {'field' if one else 'fields'}: "
+                        f"{join_fields(extra)} "
+                        f"{'does' if one else 'do'} not belong in {belongs}, so "
+                        f"{'it' if one else 'they'} should be removed."
+                    )
                 all_errors.append(describe_entry(index, entry, problems))
                 continue
 
             if not supervisor.validate_category(category=entry["category"]):
                 all_errors.append(describe_entry(index, entry, [
-                    f"\"{entry['category']}\" is not a known category."
+                    f"Unknown category: \"{entry['category']}\" is not a category "
+                    "this tool recognises.",
+                    "Valid categories are: " + ", ".join(CATEGORIES) + "."
                 ]))
                 continue
 
