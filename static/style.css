@@ -750,10 +750,44 @@ body.is-resizing canvas {
     color: var(--text-muted);
 }
 
-#jsonEditor:focus {
+#jsonEditor:focus,
+#jsonEditor.CodeMirror-focused {
     border-color: var(--accent-primary);
     box-shadow: 0 0 0 3px var(--focus-ring);
 }
+
+/* CodeMirror internals: inherit the theme rather than ship its own palette.
+   The wrapper carries #jsonEditor, so it already has the frame, padding and
+   font; these make the inner layers transparent and let it fill the panel. */
+#jsonEditor.CodeMirror {
+    height: auto;
+    font-family: var(--font-mono);
+    line-height: 1.6;
+}
+
+#jsonEditor .CodeMirror-scroll {
+    background: transparent;
+}
+
+#jsonEditor .CodeMirror-gutters {
+    display: none;
+}
+
+#jsonEditor .CodeMirror-cursor {
+    border-left-color: var(--text-primary);
+}
+
+#jsonEditor .CodeMirror-selected {
+    background: var(--focus-ring);
+}
+
+/* Token colours, mapped to the existing JSON highlight variables. Keys carry
+   both cm-string and cm-property, so cm-property must win - it is listed last
+   at equal specificity. */
+#jsonEditor .cm-string { color: var(--json-string); }
+#jsonEditor .cm-number { color: var(--json-number); }
+#jsonEditor .cm-atom { color: var(--json-boolean); }
+#jsonEditor .cm-property { color: var(--json-key); }
 
 /* JSON Syntax Highlighting */
 .json-string {
@@ -924,20 +958,39 @@ body.is-resizing canvas {
 
 /* ---------------------------------------------------------------------------
    JSON editor text direction
-   The editor is LTR by default. `unicode-bidi: plaintext` lays each LINE out
-   according to its own first strong character, so Arabic/Bengali values read
-   correctly while the JSON structure stays put. The .rtl variant flips the
-   paragraph direction for documents that are predominantly RTL.
+
+   LTR mode is plain left-to-right: no bidi overrides, so mixed-script values
+   still shape correctly via the default Unicode Bidi Algorithm.
+
+   RTL mode turns the WHOLE editor right-to-left - structure included. Lines
+   start at the right edge, and braces, commas and colons take their RTL
+   positions.
+
+   Each string value additionally gets its own isolated RTL run. That is not
+   redundant: without `isolate`, the neutral characters at a value's edges -
+   (*), brackets, ':' - resolve against the Latin key next to them rather than
+   against the Arabic they belong to, and drift to the wrong end of the string.
+   Isolation seals each quoted value so everything inside it lays out
+   right-to-left as one unit, whatever mix of scripts and punctuation it holds.
    --------------------------------------------------------------------------- */
 #jsonEditor {
     direction: ltr;
     text-align: left;
-    unicode-bidi: plaintext;
 }
 
-#jsonEditor.rtl {
+#jsonEditor.rtl,
+#jsonEditor.rtl .CodeMirror-code,
+#jsonEditor.rtl .CodeMirror-line {
     direction: rtl;
     text-align: right;
+}
+
+/* Keys are tagged class="cm-string cm-property", so both selectors are needed
+   to cover values and keys without one masking the other. */
+#jsonEditor.rtl .cm-string,
+#jsonEditor.rtl .cm-property {
+    direction: rtl;
+    unicode-bidi: isolate;
 }
 
 /* Show only the icon for the direction you can switch to */
@@ -1114,6 +1167,83 @@ body.is-resizing canvas {
 .modal-copyright {
     font-size: 11px;
     color: var(--text-muted);
+}
+
+/* ---------------------------------------------------------------------------
+   Validation errors dialog
+   Each entry is a card: which entry, what is wrong, and a one-line excerpt to
+   find it by. The excerpt is clamped because a Text entry can hold a whole
+   page of prose, which is what made the earlier raw dump unreadable.
+   --------------------------------------------------------------------------- */
+.validation-modal {
+    width: min(620px, 100%);
+}
+
+.validation-intro {
+    margin: 0 0 12px;
+    color: var(--text-secondary);
+}
+
+.validation-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.validation-error {
+    padding: 10px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--danger);
+    border-radius: var(--radius-sm);
+}
+
+.validation-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.validation-index {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.validation-category {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.validation-problem {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.validation-preview {
+    margin: 6px 0 0;
+    padding-top: 6px;
+    border-top: 1px dashed var(--border-color);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    /* One line, whatever the script or length. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.validation-footer {
+    justify-content: flex-end;
 }
 
 .about-subtitle {

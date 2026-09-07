@@ -98,44 +98,73 @@ async def upload_json(uploaded_file: UploadFile=File(...)):
     }
 
 
+PREVIEW_LENGTH = 90
+
+
+def make_preview(entry: dict):
+    """A short, single-line excerpt identifying the entry to a human.
+
+    The full text is deliberately not returned: a page-long Text entry is what
+    made the old error dialog unreadable. This is only a landmark for finding
+    the entry in the editor.
+    """
+
+    text = entry.get("text")
+    if not isinstance(text, str):
+        return ""
+
+    preview = " ".join(text.split())
+    if len(preview) > PREVIEW_LENGTH:
+        preview = preview[:PREVIEW_LENGTH].rstrip() + "…"
+
+    return preview
+
+
+def describe_entry(index: int, entry: dict, problems: List[str]):
+    """One structured error, carrying enough for the UI to render it fully."""
+
+    category = entry.get("category")
+
+    return {
+        "index": index,
+        "category": category if isinstance(category, str) else None,
+        "problems": problems,
+        "preview": make_preview(entry)
+    }
+
+
 @app.post("/validate_json")
 async def validate_json(data: List[dict]):
 
     supervisor = Supervisor()
 
     all_errors = []
-    for entry in data:
+    for index, entry in enumerate(data):
         try:
-            if not supervisor.validate_schema(entry=entry):
-                all_errors.append(f"Schema error has been found in: {entry}")
+            missing, extra = supervisor.diff_schema(entry=entry)
+            if missing or extra:
+                problems = []
+                if missing:
+                    problems.append(f"missing required key(s): {', '.join(missing)}.")
+                if extra:
+                    problems.append(f"unexpected key(s): {', '.join(extra)}.")
+                all_errors.append(describe_entry(index, entry, problems))
                 continue
-            
+
             if not supervisor.validate_category(category=entry["category"]):
-                all_errors.append(f"Invalid category has been found in: {entry}")
-                continue
-            
-            errors = []
-            if not supervisor.validate_bbox(bbox=entry["bbox"]):
-                errors.append("bbox")
-            
-            if entry["category"] == "Picture":
-                if len(errors)>0:
-                    errors_all = ", ".join(errors)
-                    all_errors.append(f"Invalid {errors_all} have been found in: {entry}")
+                all_errors.append(describe_entry(index, entry, [
+                    f"\"{entry['category']}\" is not a known category."
+                ]))
                 continue
 
-            if entry["category"] == "Table":
-                if len(errors)>0:
-                    errors_all = ", ".join(errors)
-                    all_errors.append(f"Invalid {errors_all} have been found in: {entry}")
-                continue
+            # Every category carries a bbox, so the geometry check is the same
+            # for all of them.
+            problems = supervisor.diff_bbox(bbox=entry["bbox"])
+            if problems:
+                all_errors.append(describe_entry(index, entry, problems))
 
-            if len(errors)>0:
-                errors_all = ", ".join(errors)
-                all_errors.append(f"Invalid {errors_all} have been found in: {entry}")
-        
         except Exception:
-            logger.exception(f"Validation failed on entry: {entry}")
+            logger.exception(f"Validation failed on entry {index}.")
             raise HTTPException(
                 status_code=500,
                 detail="Unknown error has occured while validating json."
