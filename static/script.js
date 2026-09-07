@@ -1,8 +1,69 @@
+// ---------------------------------------------------------------------------
+// JSON editor
+// Backed by CodeMirror so RTL mode can isolate each string VALUE as its own
+// bidi run (see applyJsonDirection). The rest of the app predates that change
+// and talks to the editor as if it were the original <textarea>, so this
+// returns a shim exposing the same surface: .value, .setSelectionRange(),
+// .focus(), .style.fontSize and addEventListener('input', ...).
+//
+// If CodeMirror fails to load the shim degrades to the real <textarea>, which
+// keeps the app fully usable minus the per-value RTL isolation.
+// ---------------------------------------------------------------------------
+let jsonCM = null;
+
+function createJsonEditor(textarea) {
+    if (!textarea || typeof CodeMirror === 'undefined') return textarea;
+
+    jsonCM = CodeMirror.fromTextArea(textarea, {
+        mode: { name: 'javascript', json: true },
+        lineNumbers: false,
+        lineWrapping: true,
+        viewportMargin: Infinity,
+    });
+
+    // fromTextArea leaves the original <textarea> in the DOM, hidden. Move the
+    // id onto the wrapper so #jsonEditor styling and getElementById reach the
+    // visible editor - two elements sharing an id would silently resolve to the
+    // hidden textarea and every style/class toggle would go nowhere.
+    const wrapper = jsonCM.getWrapperElement();
+    textarea.removeAttribute('id');
+    wrapper.id = 'jsonEditor';
+
+    return {
+        cm: jsonCM,
+        el: wrapper,
+
+        get value() { return jsonCM.getValue(); },
+        set value(v) {
+            // Preserve the cursor so programmatic refreshes (updateJSON on every
+            // box edit) don't yank the caret to the top while the user types.
+            const cursor = jsonCM.getCursor();
+            jsonCM.setValue(v == null ? '' : String(v));
+            jsonCM.setCursor(cursor);
+        },
+
+        get classList() { return wrapper.classList; },
+        get style() { return wrapper.style; },
+
+        focus() { jsonCM.focus(); },
+
+        // Character offsets in / line-ch out, so find-and-replace keeps working.
+        setSelectionRange(start, end) {
+            jsonCM.setSelection(jsonCM.posFromIndex(start), jsonCM.posFromIndex(end));
+        },
+
+        addEventListener(type, handler) {
+            if (type === 'input') jsonCM.on('change', handler);
+            else wrapper.addEventListener(type, handler);
+        },
+    };
+}
+
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const fileInput = document.getElementById('fileInput');
 const jsonFileInput = document.getElementById('jsonFileInput');
-const jsonEditor = document.getElementById('jsonEditor');
+const jsonEditor = createJsonEditor(document.getElementById('jsonEditor'));
 const imagePlaceholder = document.getElementById('imagePlaceholder');
 const annotationsList = document.getElementById('annotationsList');
 const annotationCount = document.getElementById('annotationCount');
@@ -634,7 +695,6 @@ function syntaxHighlightJSON(json) {
 }
 
 function displayColorfulJSON(jsonData) {
-    const jsonEditor = document.getElementById('jsonEditor');
     const jsonString = JSON.stringify(jsonData, null, 2);
     jsonEditor.value = jsonString;
     
@@ -787,6 +847,61 @@ async function saveJSON() {
     }
 }
 
+// Builds one error card. `err` is the structured object from /validate_json;
+// a plain string is still accepted so an older backend degrades to one line.
+function buildValidationCard(err) {
+    const card = document.createElement('li');
+    card.className = 'validation-error';
+
+    if (typeof err === 'string') {
+        const line = document.createElement('p');
+        line.className = 'validation-problem';
+        line.textContent = err;
+        card.appendChild(line);
+        return card;
+    }
+
+    // Headline: which entry, and what kind it claims to be.
+    const head = document.createElement('div');
+    head.className = 'validation-head';
+
+    const where = document.createElement('span');
+    where.className = 'validation-index';
+    // 1-based, matching the overlay labels and the "N entries" footer count.
+    where.textContent = 'Entry ' + (err.index + 1);
+    head.appendChild(where);
+
+    if (err.category) {
+        const cat = document.createElement('span');
+        cat.className = 'validation-category';
+        cat.textContent = err.category;
+        head.appendChild(cat);
+    }
+
+    card.appendChild(head);
+
+    (err.problems || []).forEach(function (problem) {
+        const line = document.createElement('p');
+        line.className = 'validation-problem';
+        line.textContent = problem;
+        card.appendChild(line);
+    });
+
+    // The excerpt is a landmark for locating the entry, not the entry itself,
+    // so it stays clamped to one line however long the text is.
+    if (err.preview) {
+        const preview = document.createElement('p');
+        preview.className = 'validation-preview';
+        preview.textContent = err.preview;
+        // Let the browser lay the excerpt out by its own script, so Arabic and
+        // Bengali previews read correctly inside the LTR dialog.
+        preview.setAttribute('dir', 'auto');
+        card.appendChild(preview);
+    }
+
+    return card;
+}
+
 function showValidationErrors(errors) {
     // Remove any existing modal
     const existing = document.getElementById('validationErrorsModal');
@@ -794,62 +909,59 @@ function showValidationErrors(errors) {
 
     const overlay = document.createElement('div');
     overlay.id = 'validationErrorsModal';
-    overlay.style.position = 'fixed';
-    overlay.style.left = 0;
-    overlay.style.top = 0;
-    overlay.style.width = '100%';
-    overlay.style.height = '100%';
-    overlay.style.background = 'rgba(0,0,0,0.4)';
-    overlay.style.display = 'flex';
-    overlay.style.alignItems = 'center';
-    overlay.style.justifyContent = 'center';
-    overlay.style.zIndex = 9999;
+    // Reuse the About dialog's chrome so both dialogs look like one app.
+    overlay.className = 'modal-overlay';
+    overlay.addEventListener('click', function (event) {
+        if (event.target === overlay) overlay.remove();
+    });
 
     const box = document.createElement('div');
-    // Use app theme variables so the modal matches the UI
-    box.style.background = 'var(--bg-secondary)';
-    box.style.color = 'var(--text-primary)';
-    box.style.border = '1px solid var(--border-color)';
-    box.style.padding = '18px';
-    box.style.borderRadius = '8px';
-    box.style.maxWidth = '720px';
-    box.style.width = '90%';
-    box.style.maxHeight = '80%';
-    box.style.overflow = 'auto';
-    box.style.boxShadow = '0 6px 24px rgba(0,0,0,0.4)';
+    box.className = 'modal validation-modal';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
 
-    const title = document.createElement('h3');
-    title.textContent = `Validation Errors (${errors.length})`;
-    title.style.marginTop = '0';
-    box.appendChild(title);
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+
+    const title = document.createElement('h2');
+    title.className = 'modal-title';
+    const n = errors.length;
+    title.textContent = n === 1
+        ? '1 entry needs fixing'
+        : n + ' entries need fixing';
+    header.appendChild(title);
+    box.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+
+    const intro = document.createElement('p');
+    intro.className = 'validation-intro';
+    intro.textContent = 'Nothing was saved. Fix these entries in the editor, then save again.';
+    body.appendChild(intro);
 
     const list = document.createElement('ul');
-    list.style.paddingLeft = '18px';
-    errors.forEach(err => {
-        const li = document.createElement('li');
-        li.textContent = typeof err === 'string' ? err : JSON.stringify(err);
-        li.style.color = 'var(--text-secondary)';
-        li.style.marginBottom = '6px';
-        list.appendChild(li);
+    list.className = 'validation-list';
+    errors.forEach(function (err) {
+        list.appendChild(buildValidationCard(err));
     });
-    box.appendChild(list);
+    body.appendChild(list);
+    box.appendChild(body);
 
-    const btnRow = document.createElement('div');
-    btnRow.style.display = 'flex';
-    btnRow.style.justifyContent = 'flex-end';
-    btnRow.style.marginTop = '12px';
+    const footer = document.createElement('div');
+    footer.className = 'modal-footer validation-footer';
 
     const closeBtn = document.createElement('button');
     closeBtn.textContent = 'Close';
-    // Use themed primary button so it fits the application style
     closeBtn.className = 'small-btn primary';
-    closeBtn.style.marginLeft = '8px';
-    closeBtn.onclick = () => overlay.remove();
-    btnRow.appendChild(closeBtn);
+    closeBtn.onclick = function () { overlay.remove(); };
+    footer.appendChild(closeBtn);
 
-    box.appendChild(btnRow);
+    box.appendChild(footer);
     overlay.appendChild(box);
     document.body.appendChild(overlay);
+
+    closeBtn.focus();
 }
 
 // Keyboard shortcuts
@@ -908,6 +1020,8 @@ function updateJsonZoomDisplay() {
     const zEl = document.getElementById('jsonZoomLevel');
     if (zEl) zEl.textContent = `${Math.round(jsonZoomLevel * 100)}%`;
     if (jsonEditor) jsonEditor.style.fontSize = `${baseJsonFontSize * jsonZoomLevel}px`;
+    // CodeMirror measures character width once; re-measure after a size change.
+    if (jsonCM) jsonCM.refresh();
 }
 
 function zoomJsonIn() {
@@ -1186,21 +1300,29 @@ function closeAboutBackdrop(event) {
 }
 
 document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeAbout();
+    if (e.key !== 'Escape') return;
+    closeAbout();
+
+    const validation = document.getElementById('validationErrorsModal');
+    if (validation) validation.remove();
 });
 
 // ---------------------------------------------------------------------------
 // JSON editor text direction (LTR / RTL)
-// The editor always uses `unicode-bidi: plaintext`, so each line follows its
-// own strong character. This toggle switches the surrounding paragraph
-// direction for documents that read predominantly right-to-left.
+// RTL mode keeps the JSON structure (keys, braces, commas) reading left to
+// right and flips only the quoted string VALUES, each of which becomes its own
+// isolated RTL run. Isolation is what makes leading markers like "(*)" sit on
+// the right: without it the Latin key to the left of the string pulls those
+// neutral characters back to the LTR side. See the .cm-string rules in
+// style.css - the work is done there; this only toggles the class.
 // ---------------------------------------------------------------------------
 function applyJsonDirection(dir, persist) {
     const rtl = dir === 'rtl';
-    const editor = document.getElementById('jsonEditor');
     const btn = document.getElementById('jsonDirBtn');
 
-    if (editor) editor.classList.toggle('rtl', rtl);
+    if (jsonEditor) jsonEditor.classList.toggle('rtl', rtl);
+    // CodeMirror caches character metrics; force a re-measure after the flip.
+    if (jsonCM) jsonCM.refresh();
 
     if (btn) {
         btn.classList.toggle('is-rtl', rtl);
@@ -1220,8 +1342,7 @@ function applyJsonDirection(dir, persist) {
 }
 
 function toggleJsonDirection() {
-    const editor = document.getElementById('jsonEditor');
-    const isRtl = editor && editor.classList.contains('rtl');
+    const isRtl = jsonEditor && jsonEditor.classList.contains('rtl');
     applyJsonDirection(isRtl ? 'ltr' : 'rtl', true);
 }
 
@@ -1266,8 +1387,7 @@ function updateFooter() {
     }
 
     if (jsonEl) {
-        const editor = document.getElementById('jsonEditor');
-        const raw = editor ? editor.value.trim() : '';
+        const raw = jsonEditor ? jsonEditor.value.trim() : '';
         if (!raw) {
             jsonEl.textContent = 'JSON empty';
             jsonEl.style.color = '';
@@ -1301,11 +1421,10 @@ function updateFooter() {
 
 document.addEventListener('DOMContentLoaded', function () {
     updateFooter();
-    const editor = document.getElementById('jsonEditor');
-    if (editor) {
-        editor.addEventListener('input', updateFooter);
+    if (jsonEditor) {
+        jsonEditor.addEventListener('input', updateFooter);
         // Keep the overlay in step with hand edits to the JSON.
-        editor.addEventListener('input', refreshBoundingBoxes);
+        jsonEditor.addEventListener('input', refreshBoundingBoxes);
     }
 });
 

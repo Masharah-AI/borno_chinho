@@ -18,9 +18,21 @@ class Supervisor:
     
     def validate_schema(self, entry: dict):
 
+        missing, extra = self.diff_schema(entry=entry)
+
+        return len(missing) == 0 and len(extra) == 0
+
+
+    def diff_schema(self, entry: dict):
+        """Which keys the entry is missing, and which it has that it should not.
+
+        Returned instead of a bare bool so the caller can say *what* is wrong
+        rather than only that something is.
+        """
+
         if "category" not in entry.keys():
-            return False
-        
+            return ["category"], []
+
         schema = None
         if entry["category"] == "Picture":
             schema = self.picture_schema
@@ -31,25 +43,52 @@ class Supervisor:
 
         available_schema = set(entry.keys())
         required_schema = set(schema)
-        extra_schema = available_schema.symmetric_difference(required_schema)
 
-        if len(extra_schema) == 0:
-            return True
-        else:
-            return False
-        
+        missing = sorted(required_schema.difference(available_schema))
+        extra = sorted(available_schema.difference(required_schema))
+
+        return missing, extra
+
 
     def validate_bbox(self, bbox: list):
 
-        pos_coord = [int(coord)>0 for coord in bbox]
-        if False in pos_coord:
-            return False
-        
-        if bbox[0]>bbox[2] or bbox[1]>bbox[3]:
-            return False
-        
-        return True
-    
+        return len(self.diff_bbox(bbox=bbox)) == 0
+
+
+    def diff_bbox(self, bbox: list):
+        """The bbox rules this box breaks, phrased for the person reading them.
+
+        Each reason is a complete sentence naming the offending numbers, so the
+        UI can show it without knowing anything about the rules.
+        """
+
+        if not isinstance(bbox, list):
+            return ["bbox must be a list of four numbers."]
+
+        if len(bbox) != 4:
+            return [f"bbox needs exactly 4 numbers, but has {len(bbox)}."]
+
+        try:
+            coords = [int(coord) for coord in bbox]
+        except (TypeError, ValueError):
+            return [f"bbox must hold four numbers, but is {bbox}."]
+
+        reasons = []
+
+        negative = [str(coord) for coord in coords if coord <= 0]
+        if negative:
+            reasons.append(
+                f"coordinates must be positive, but found {', '.join(negative)}."
+            )
+
+        x1, y1, x2, y2 = coords
+        if x1 > x2:
+            reasons.append(f"left edge ({x1}) is right of the right edge ({x2}).")
+        if y1 > y2:
+            reasons.append(f"top edge ({y1}) is below the bottom edge ({y2}).")
+
+        return reasons
+
 
     def validate_category(self, category: str):
 
