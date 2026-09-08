@@ -62,6 +62,10 @@
                         <i data-lucide="folder-open"></i>
                         Mount Images
                     </button>
+                    <button class="small-btn" id="serverImagesBtn" title="Mount an image folder from the server dataset" onclick="mountServerFolder('images')">
+                        <i data-lucide="server"></i>
+                        Server Images
+                    </button>
                     <button class="small-btn" id="showBoxesBtn" title="Show bounding boxes from the loaded JSON"
                             onclick="toggleBoundingBoxes()" aria-pressed="false">
                         <i data-lucide="scan-search"></i>
@@ -176,6 +180,10 @@
                         <button class="small-btn" id="mountJsonBtn" title="Mount a folder of annotations" onclick="mountJsonFolder()">
                             <i data-lucide="folder-open"></i>
                             Mount JSON
+                        </button>
+                        <button class="small-btn" id="serverJsonBtn" title="Mount an annotation folder from the server dataset" onclick="mountServerFolder('json')">
+                            <i data-lucide="server"></i>
+                            Server JSON
                         </button>
                         <button class="small-btn primary" id="saveJsonBtn" onclick="saveJSON()">
                             <i data-lucide="save"></i>

@@ -13,6 +13,12 @@ HOST = "0.0.0.0"
 
 PORT = 2828
 
+# Root of the server-side dataset browsed by the "Server" mount buttons.
+# Override with BORNO_DATA_DIR when the dataset lives elsewhere.
+DATA_DIR = os.environ.get("BORNO_DATA_DIR", "/data/masharah_dataset/dataset")
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+
 PICTURE_SCHEMA = [
     "bbox", 
     "category"

@@ -1439,6 +1439,10 @@ let mountedJson = null;      // Map<basename, FileSystemFileHandle>
 let mounted = null;          // { pages: [...] } once both folders are present
 let imageIndex = 0;
 let jsonIndex = 0;
+// Where each mounted folder lives ('local' | 'server' | null), so the toolbar
+// can light up the button that actually did the mounting.
+let mountedImagesSource = null;
+let mountedJsonSource = null;
 
 function isMountSupported() {
     return typeof window.showDirectoryPicker === 'function';
@@ -1486,6 +1490,7 @@ async function mountImageFolder() {
             alert('That folder contains no images.');
             return;
         }
+        mountedImagesSource = 'local';
         await pairMountedFolders('image');
     } catch (e) {
         alert('Could not read the image folder: ' + e.message);
@@ -1507,6 +1512,7 @@ async function mountJsonFolder() {
             alert('That folder contains no .json files.');
             return;
         }
+        mountedJsonSource = 'local';
         await pairMountedFolders('json');
     } catch (e) {
         alert('Could not read the annotation folder: ' + e.message);
@@ -1576,22 +1582,28 @@ function showPagers() {
     document.getElementById('jsonPager').style.display = 'flex';
 }
 
-// Reflects which folders are mounted on the two buttons.
+// Reflects which folders are mounted on the four buttons; the one that did
+// the mounting lights up, its counterpart offers to switch source.
 function updateMountStatus() {
-    const imgBtn = document.getElementById('mountImagesBtn');
-    const jsonBtn = document.getElementById('mountJsonBtn');
-    if (imgBtn) {
-        imgBtn.classList.toggle('is-mounted', !!mountedImages);
-        imgBtn.title = mountedImages
-            ? 'Images mounted (' + mountedImages.size + ') - click to change folder'
-            : 'Mount a folder of images';
-    }
-    if (jsonBtn) {
-        jsonBtn.classList.toggle('is-mounted', !!mountedJson);
-        jsonBtn.title = mountedJson
-            ? 'Annotation folder mounted (' + mountedJson.size + ' files) - click to change'
-            : 'Mount a folder of annotations';
-    }
+    const buttons = [
+        { id: 'mountImagesBtn', map: mountedImages, source: mountedImagesSource, mine: 'local',
+          idle: 'Mount a folder of images', what: 'Images' },
+        { id: 'serverImagesBtn', map: mountedImages, source: mountedImagesSource, mine: 'server',
+          idle: 'Mount an image folder from the server dataset', what: 'Images' },
+        { id: 'mountJsonBtn', map: mountedJson, source: mountedJsonSource, mine: 'local',
+          idle: 'Mount a folder of annotations', what: 'Annotations' },
+        { id: 'serverJsonBtn', map: mountedJson, source: mountedJsonSource, mine: 'server',
+          idle: 'Mount an annotation folder from the server dataset', what: 'Annotations' }
+    ];
+    buttons.forEach(function (spec) {
+        const btn = document.getElementById(spec.id);
+        if (!btn) return;
+        const active = !!spec.map && spec.source === spec.mine;
+        btn.classList.toggle('is-mounted', active);
+        btn.title = active
+            ? spec.what + ' mounted (' + spec.map.size + ' files) - click to change folder'
+            : spec.idle;
+    });
 }
 
 // Guards against out-of-order completion when pages are stepped quickly.
@@ -1704,3 +1716,302 @@ function updatePagers() {
     document.getElementById('imagePager').classList.toggle('is-desynced', desynced);
     document.getElementById('jsonPager').classList.toggle('is-desynced', desynced);
 }
+
+// ---------------------------------------------------------------------------
+// Server folders
+// The same mount-and-page workflow, but over the dataset directory that lives
+// on the server, so nobody has to copy gigabytes of pages to their own machine
+// first. Server files are wrapped in objects that mimic the two methods the
+// mount code actually uses - getFile() and createWritable() - so pairing,
+// paging and in-place saving all reuse the local-mount code unchanged. Unlike
+// local mounts this needs no File System Access API, so it also works from
+// browsers and non-secure LAN/VPN addresses where local mounting cannot.
+// ---------------------------------------------------------------------------
+
+// The dataset keeps images/<book> and annotations/<book> mirrored, so after
+// one side is mounted the matching other side can be offered automatically.
+const SERVER_SIBLING_ROOTS = {
+    'images': 'annotations',
+    'images_v2': 'annotations_v2',
+    'annotations': 'images',
+    'annotations_v2': 'images_v2'
+};
+
+function serverFileHandle(relPath, name) {
+    return {
+        name: name,
+
+        async getFile() {
+            const response = await fetch('/server/file?path=' + encodeURIComponent(relPath));
+            if (!response.ok) {
+                throw new Error('Could not read ' + name + ' from the server.');
+            }
+            const blob = await response.blob();
+            return new File([blob], name, { type: blob.type });
+        },
+
+        // Collects the written data, then ships it on close() - mirroring how
+        // a FileSystemWritableFileStream only commits when closed.
+        async createWritable() {
+            let buffer = '';
+            return {
+                async write(data) { buffer = data; },
+                async close() {
+                    const response = await fetch('/server/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: relPath, text: buffer })
+                    });
+                    if (!response.ok) {
+                        let detail = 'Server save failed';
+                        try {
+                            const err = await response.json();
+                            if (err.detail) detail = err.detail;
+                        } catch (e) { /* keep the generic message */ }
+                        throw new Error(detail);
+                    }
+                },
+                async abort() { /* nothing was sent yet */ }
+            };
+        }
+    };
+}
+
+async function fetchServerJson(url) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        let detail = 'Server request failed';
+        try {
+            const err = await response.json();
+            if (err.detail) detail = err.detail;
+        } catch (e) { /* keep the generic message */ }
+        throw new Error(detail);
+    }
+    return response.json();
+}
+
+// Builds the basename->handle map for one server folder and mounts it on the
+// requested side, exactly as the local mount functions do.
+async function mountServerDirectory(kind, path) {
+    const data = await fetchServerJson(
+        '/server/files?path=' + encodeURIComponent(path) + '&kind=' + kind
+    );
+
+    const found = new Map();
+    data.files.forEach(function (name) {
+        const dot = name.lastIndexOf('.');
+        const base = dot < 0 ? name : name.slice(0, dot);
+        const rel = path ? path + '/' + name : name;
+        found.set(base, serverFileHandle(rel, name));
+    });
+
+    if (found.size === 0) {
+        alert('That server folder contains no ' + (kind === 'images' ? 'images.' : '.json files.'));
+        return false;
+    }
+
+    if (kind === 'images') {
+        mountedImages = found;
+        mountedImagesSource = 'server';
+    } else {
+        mountedJson = found;
+        mountedJsonSource = 'server';
+    }
+    await pairMountedFolders(kind === 'images' ? 'image' : 'json');
+    return true;
+}
+
+// The mirrored counterpart of a dataset path, e.g. images_v2/foo ->
+// annotations_v2/foo, or null when the path is not under a mirrored root.
+function serverSiblingPath(path) {
+    const parts = path.split('/');
+    const mapped = SERVER_SIBLING_ROOTS[parts[0]];
+    if (!mapped) return null;
+    return [mapped].concat(parts.slice(1)).join('/');
+}
+
+// After mounting one side, offers the matching folder from the mirrored tree
+// so a book can be opened with a single trip through the picker.
+async function offerServerSibling(kind, path) {
+    const otherKind = kind === 'images' ? 'json' : 'images';
+    const alreadyMounted = otherKind === 'images' ? mountedImages : mountedJson;
+    if (alreadyMounted) return;
+
+    const sibling = serverSiblingPath(path);
+    if (!sibling) return;
+
+    try {
+        const data = await fetchServerJson(
+            '/server/files?path=' + encodeURIComponent(sibling) + '&kind=' + otherKind
+        );
+        if (data.files.length === 0) return;
+
+        const label = otherKind === 'json' ? 'annotation' : 'image';
+        if (confirm('Found the matching ' + label + ' folder on the server:\n\n'
+                    + sibling + '\n\nMount it too?')) {
+            await mountServerDirectory(otherKind, sibling);
+        }
+    } catch (e) {
+        // The suggestion is a convenience; a missing sibling is not an error.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server folder picker
+// A minimal directory browser over /server/browse, built on the same modal
+// chrome as the About and validation dialogs.
+// ---------------------------------------------------------------------------
+let serverBrowse = null; // { kind, path } while the picker is open
+
+function mountServerFolder(kind) {
+    openServerBrowser(kind);
+}
+
+function closeServerBrowser() {
+    const overlay = document.getElementById('serverBrowserModal');
+    if (overlay) overlay.remove();
+    serverBrowse = null;
+}
+
+function openServerBrowser(kind) {
+    closeServerBrowser();
+    serverBrowse = { kind: kind, path: '' };
+
+    const overlay = document.createElement('div');
+    overlay.id = 'serverBrowserModal';
+    overlay.className = 'modal-overlay';
+    overlay.addEventListener('click', function (event) {
+        if (event.target === overlay) closeServerBrowser();
+    });
+
+    const box = document.createElement('div');
+    box.className = 'modal server-browser';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    const title = document.createElement('h2');
+    title.className = 'modal-title';
+    title.textContent = kind === 'images'
+        ? 'Choose an image folder on the server'
+        : 'Choose an annotation folder on the server';
+    header.appendChild(title);
+    box.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+
+    const crumb = document.createElement('p');
+    crumb.id = 'serverBrowserPath';
+    crumb.className = 'server-browser-path';
+    body.appendChild(crumb);
+
+    const list = document.createElement('ul');
+    list.id = 'serverBrowserList';
+    list.className = 'server-browser-list';
+    body.appendChild(list);
+
+    const counts = document.createElement('p');
+    counts.id = 'serverBrowserCounts';
+    counts.className = 'server-browser-counts';
+    body.appendChild(counts);
+
+    box.appendChild(body);
+
+    const footer = document.createElement('div');
+    footer.className = 'modal-footer';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'small-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = closeServerBrowser;
+    footer.appendChild(cancelBtn);
+
+    const mountBtn = document.createElement('button');
+    mountBtn.id = 'serverBrowserMountBtn';
+    mountBtn.className = 'small-btn primary';
+    mountBtn.textContent = 'Mount this folder';
+    mountBtn.disabled = true;
+    mountBtn.onclick = mountFromServerBrowser;
+    footer.appendChild(mountBtn);
+
+    box.appendChild(footer);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    loadServerDirectory('');
+}
+
+async function loadServerDirectory(path) {
+    if (!serverBrowse) return;
+    serverBrowse.path = path;
+
+    const list = document.getElementById('serverBrowserList');
+    const crumb = document.getElementById('serverBrowserPath');
+    const counts = document.getElementById('serverBrowserCounts');
+    const mountBtn = document.getElementById('serverBrowserMountBtn');
+    if (!list || !crumb || !counts || !mountBtn) return;
+
+    crumb.textContent = '/' + (path || '');
+    list.innerHTML = '';
+    counts.textContent = 'Loading…';
+    mountBtn.disabled = true;
+
+    let data;
+    try {
+        data = await fetchServerJson('/server/browse?path=' + encodeURIComponent(path));
+    } catch (e) {
+        counts.textContent = e.message || 'Could not read that folder.';
+        return;
+    }
+    // A slow response for a folder the user has already navigated away from.
+    if (!serverBrowse || serverBrowse.path !== path) return;
+
+    function addEntry(label, targetPath, isParent) {
+        const item = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'server-browser-entry' + (isParent ? ' is-parent' : '');
+        btn.textContent = label;
+        btn.onclick = function () { loadServerDirectory(targetPath); };
+        item.appendChild(btn);
+        list.appendChild(item);
+    }
+
+    if (path) {
+        const parent = path.split('/').slice(0, -1).join('/');
+        addEntry('.. (up one level)', parent, true);
+    }
+    data.dirs.forEach(function (name) {
+        addEntry(name, path ? path + '/' + name : name, false);
+    });
+    if (!path && data.dirs.length === 0
+            && data.image_count === 0 && data.json_count === 0) {
+        counts.textContent = 'The server data directory is empty.';
+        return;
+    }
+
+    const relevant = serverBrowse.kind === 'images' ? data.image_count : data.json_count;
+    counts.textContent = data.image_count + ' image files, '
+        + data.json_count + ' annotation files in this folder';
+    mountBtn.disabled = relevant === 0;
+}
+
+async function mountFromServerBrowser() {
+    if (!serverBrowse) return;
+    const kind = serverBrowse.kind;
+    const path = serverBrowse.path;
+
+    try {
+        const ok = await mountServerDirectory(kind, path);
+        closeServerBrowser();
+        if (ok) await offerServerSibling(kind, path);
+    } catch (e) {
+        alert('Could not mount the server folder: ' + (e.message || e));
+    }
+}
+
+document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeServerBrowser();
+});

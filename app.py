@@ -1,9 +1,13 @@
+import os
 import json
 import base64
+import shutil
 import uvicorn
 from typing import List
+from pathlib import Path
+from pydantic import BaseModel
 from contextlib import asynccontextmanager
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +15,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 
 from services.supervisor import Supervisor
 from logger import setup_logging, get_logger
-from config import HOST, PORT, CATEGORIES
+from config import HOST, PORT, CATEGORIES, DATA_DIR, IMAGE_EXTENSIONS
 
 setup_logging()
 logger = get_logger("app")
@@ -96,6 +100,165 @@ async def upload_json(uploaded_file: UploadFile=File(...)):
         "name": json_name,
         "content": json_content
     }
+
+
+# ---------------------------------------------------------------------------
+# Server-side dataset access
+# Lets the frontend browse, read and write files under DATA_DIR on the host,
+# so annotators can work on the shared dataset without copying it to their own
+# machine first. Every path from the client is resolved against DATA_DIR and
+# rejected if it escapes it; only .json files can be written back.
+# ---------------------------------------------------------------------------
+
+# Shadow tree holding a copy of each annotation file as it was before its
+# first edit through this tool, so a bad save never destroys the only copy.
+BACKUP_DIR_NAME = ".borno_backups"
+
+
+def data_root():
+
+    root = Path(DATA_DIR).resolve()
+    if not root.is_dir():
+        logger.error(f"Server data directory is not available: {DATA_DIR}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server data directory is not available: {DATA_DIR}"
+        )
+    return root
+
+
+def resolve_data_path(rel_path: str):
+    """The absolute path for a client-supplied one, confined to DATA_DIR."""
+
+    root = data_root()
+    candidate = (root / rel_path.lstrip("/")).resolve()
+
+    if candidate != root and root not in candidate.parents:
+        logger.warning(f"Rejected path outside the data directory: '{rel_path}'.")
+        raise HTTPException(
+            status_code=400,
+            detail="Path escapes the server data directory."
+        )
+    return root, candidate
+
+
+@app.get("/server/browse")
+async def server_browse(path: str = ""):
+    """The immediate subfolders of one dataset folder, plus how many image
+    and annotation files sit directly in it, for the folder picker."""
+
+    root, directory = resolve_data_path(path)
+    if not directory.is_dir():
+        raise HTTPException(status_code=404, detail="No such folder on the server.")
+
+    dirs = []
+    image_count = 0
+    json_count = 0
+    for entry in os.scandir(directory):
+        if entry.name.startswith("."):
+            continue
+        if entry.is_dir():
+            dirs.append(entry.name)
+        elif entry.is_file():
+            ext = os.path.splitext(entry.name)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                image_count += 1
+            elif ext == ".json":
+                json_count += 1
+
+    dirs.sort()
+    rel = "" if directory == root else str(directory.relative_to(root))
+
+    return {
+        "path": rel,
+        "dirs": dirs,
+        "image_count": image_count,
+        "json_count": json_count
+    }
+
+
+@app.get("/server/files")
+async def server_files(path: str = "", kind: str = "images"):
+
+    if kind not in ("images", "json"):
+        raise HTTPException(status_code=400, detail="kind must be 'images' or 'json'.")
+
+    root, directory = resolve_data_path(path)
+    if not directory.is_dir():
+        raise HTTPException(status_code=404, detail="No such folder on the server.")
+
+    extensions = IMAGE_EXTENSIONS if kind == "images" else {".json"}
+    files = [
+        entry.name for entry in os.scandir(directory)
+        if entry.is_file()
+        and not entry.name.startswith(".")
+        and os.path.splitext(entry.name)[1].lower() in extensions
+    ]
+    files.sort()
+
+    rel = "" if directory == root else str(directory.relative_to(root))
+
+    return {"path": rel, "files": files}
+
+
+@app.get("/server/file")
+async def server_file(path: str):
+
+    root, file_path = resolve_data_path(path)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="No such file on the server.")
+
+    return FileResponse(file_path)
+
+
+class ServerSaveRequest(BaseModel):
+    path: str
+    text: str
+
+
+@app.post("/server/save")
+async def server_save(request: ServerSaveRequest):
+
+    root, file_path = resolve_data_path(request.path)
+
+    if file_path.suffix.lower() != ".json":
+        raise HTTPException(
+            status_code=400,
+            detail="Only .json files can be written to the server."
+        )
+    if not file_path.parent.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail="The folder for that file does not exist on the server."
+        )
+
+    try:
+        json.loads(request.text)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Server save rejected: '{request.path}' is not valid json: {e}")
+        raise HTTPException(status_code=400, detail="Malformed json content.")
+
+    rel = file_path.relative_to(root)
+
+    if file_path.exists():
+        backup_path = root / BACKUP_DIR_NAME / rel
+        if not backup_path.exists():
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(file_path, backup_path)
+
+    # Write-then-rename, so a crash mid-write cannot leave a truncated file.
+    tmp_path = file_path.with_name(file_path.name + ".tmp~")
+    try:
+        tmp_path.write_text(request.text, encoding="utf-8")
+        os.replace(tmp_path, file_path)
+    except OSError as e:
+        tmp_path.unlink(missing_ok=True)
+        logger.exception(f"Server save failed for '{request.path}'.")
+        raise HTTPException(status_code=500, detail=f"Could not write the file: {e}")
+
+    logger.info(f"Saved '{rel}' to the server dataset.")
+
+    return {"status": "saved", "path": str(rel)}
 
 
 PREVIEW_LENGTH = 90

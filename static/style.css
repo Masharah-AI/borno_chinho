@@ -1527,3 +1527,63 @@ kbd {
     flex-shrink: 0;
     margin: 0;
 }
+
+/* ---------------------------------------------------------------------------
+   Server folder picker
+   --------------------------------------------------------------------------- */
+.server-browser .modal-body {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.server-browser-path {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    margin: 0 0 10px;
+    word-break: break-all;
+}
+
+.server-browser-list {
+    list-style: none;
+    margin: 0 0 10px;
+    padding: 0;
+    overflow-y: auto;
+    max-height: 40vh;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+}
+
+.server-browser-list li + li {
+    border-top: 1px solid var(--border-color);
+}
+
+.server-browser-entry {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 7px 12px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.server-browser-entry:hover {
+    background: var(--bg-tertiary);
+}
+
+.server-browser-entry.is-parent {
+    color: var(--text-muted);
+}
+
+.server-browser-counts {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin: 0;
+}
