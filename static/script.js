@@ -966,8 +966,17 @@ function showValidationErrors(errors) {
 
 // Keyboard shortcuts
 document.addEventListener('keydown', function(e) {
-    // Delete selected annotation with Delete or Backspace key
-    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedAnnotation !== null) {
+    // Typing in a text field must never trigger annotation shortcuts
+    const target = e.target;
+    const isEditing = target && (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable
+    );
+
+    // Delete selected annotation with the Delete key
+    // (Backspace is intentionally excluded so it keeps its default text-editing behavior)
+    if (e.key === 'Delete' && selectedAnnotation !== null && !isEditing) {
         e.preventDefault();
         rectangles.splice(selectedAnnotation, 1);
         selectedAnnotation = null;
