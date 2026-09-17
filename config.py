@@ -40,7 +40,8 @@ CATEGORIES = [
     "Table",
     "Caption",
     "Footnote",
-    "Page-footer"
+    "Page-footer",
+    "Page-number"
 ]
 
 FONT_SIZES = {
