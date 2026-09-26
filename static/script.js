@@ -135,10 +135,10 @@ async function uploadImage(event) {
             const src = `data:${mime};base64,${data.content}`;
             loadImage(src);
         } else {
-            alert('Failed to upload image');
+            showToast('error', 'Failed to upload the image.');
         }
     } catch (error) {
-        alert('Error uploading image: ' + error);
+        showToast('error', 'Error uploading the image: ' + (error.message || error));
     }
 }
 
@@ -154,13 +154,20 @@ async function displayJSONFile(file) {
     });
 
     if (!response.ok) {
-        alert('Failed to upload JSON');
+        let detail = 'Failed to load the JSON file.';
+        try {
+            const err = await response.json();
+            if (err.detail) detail = file.name + ': ' + err.detail;
+        } catch (e) { /* keep the generic message */ }
+        showToast('error', detail);
         return false;
     }
 
     const data = await response.json();
     currentJsonFile = data.name || file.name;
     jsonEditor.value = JSON.stringify(data.content, null, 2);
+    // A freshly loaded file starts clean.
+    noteJsonDocumentLoaded();
     refreshBoundingBoxes();
     return true;
 }
@@ -169,6 +176,14 @@ async function displayJSONFile(file) {
 // be overwritten in place on save; otherwise falls back to the hidden input,
 // where saving can only download.
 async function openJsonFile() {
+    // Loading a file replaces the editor; don't drop unsaved edits silently.
+    if (isJsonDirty()) {
+        const name = currentJsonFile || 'the current file';
+        if (!confirm('Unsaved changes in ' + name + ' will be LOST.\n\nDiscard the changes and load another file?')) {
+            return;
+        }
+    }
+
     if (typeof window.showOpenFilePicker !== 'function') {
         jsonFileInput.click();
         return;
@@ -195,7 +210,7 @@ async function openJsonFile() {
             loadedJsonHandle = handle;
         }
     } catch (error) {
-        alert('Error opening JSON: ' + (error.message || error));
+        showToast('error', 'Error opening the JSON file: ' + (error.message || error));
     }
 }
 
@@ -209,7 +224,7 @@ async function uploadJSONFile(event) {
     try {
         await displayJSONFile(file);
     } catch (error) {
-        alert('Error uploading JSON: ' + error);
+        showToast('error', 'Error loading the JSON file: ' + (error.message || error));
     }
 }
 
@@ -730,20 +745,151 @@ function updateJSON() {
     jsonEditor.value = JSON.stringify(annotations, null, 2);
 }
 
-function triggerSaveDialog() {
+// ---------------------------------------------------------------------------
+// Toasts
+// Non-blocking notifications, stacked bottom-right above the footer. Errors
+// stay longer than confirmations; every toast can be dismissed by hand.
+// ---------------------------------------------------------------------------
+const TOAST_ICONS = {
+    success: 'circle-check',
+    error: 'circle-alert',
+    warning: 'triangle-alert',
+    info: 'info'
+};
+
+function toastContainer() {
+    let el = document.getElementById('toastContainer');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'toastContainer';
+        el.className = 'toast-container';
+        el.setAttribute('aria-live', 'polite');
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+function showToast(type, message, duration) {
+    const toast = document.createElement('div');
+    toast.className = 'toast toast-' + type;
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+
+    const icon = document.createElement('i');
+    icon.setAttribute('data-lucide', TOAST_ICONS[type] || 'info');
+    toast.appendChild(icon);
+
+    const text = document.createElement('span');
+    text.className = 'toast-message';
+    text.textContent = message;
+    toast.appendChild(text);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'toast-close';
+    closeBtn.title = 'Dismiss';
+    closeBtn.textContent = '×';
+    closeBtn.onclick = function () { dismissToast(toast); };
+    toast.appendChild(closeBtn);
+
+    toastContainer().appendChild(toast);
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+
+    const ms = duration || (type === 'error' ? 8000 : type === 'warning' ? 6000 : 3500);
+    toast._timer = setTimeout(function () { dismissToast(toast); }, ms);
+    return toast;
+}
+
+function dismissToast(toast) {
+    if (!toast || toast._dismissed) return;
+    toast._dismissed = true;
+    clearTimeout(toast._timer);
+    toast.classList.add('toast-out');
+    setTimeout(function () { toast.remove(); }, 250);
+}
+
+// ---------------------------------------------------------------------------
+// Save state
+// jsonBaseline is the editor's contents as of the last load or save, so
+// dirty = (current !== baseline). jsonDocEpoch increments whenever a different
+// document is put on screen; a save that finishes after the user has paged
+// away compares epochs and leaves the new page's state alone.
+// ---------------------------------------------------------------------------
+let jsonBaseline = '';
+let jsonDocEpoch = 0;
+let isSaving = false;
+let savedFlashTimer = null;
+
+function isJsonDirty() {
+    return !!jsonEditor && jsonEditor.value !== jsonBaseline;
+}
+
+// The save button is a tiny state machine: idle / saving / saved. 'saved'
+// flashes briefly and falls back to idle; every transition cancels the
+// previous flash so a page change can never inherit a stale "Saved".
+function setSaveButton(state) {
+    const btn = document.getElementById('saveJsonBtn');
+    if (!btn) return;
+
+    clearTimeout(savedFlashTimer);
+    btn.classList.remove('is-saving', 'is-saved');
+    btn.disabled = false;
+
+    if (state === 'saving') {
+        btn.disabled = true;
+        btn.classList.add('is-saving');
+        btn.innerHTML = '<i data-lucide="loader-circle" class="spin"></i> Saving…';
+    } else if (state === 'saved') {
+        btn.classList.add('is-saved');
+        btn.innerHTML = '<i data-lucide="check"></i> Saved';
+        savedFlashTimer = setTimeout(function () { setSaveButton('idle'); }, 1600);
+    } else {
+        btn.innerHTML = '<i data-lucide="save"></i> Save';
+    }
+
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+    updateSaveIndicators();
+}
+
+// The amber "unsaved" dot on the save button plus the footer status line.
+function updateSaveIndicators() {
+    const btn = document.getElementById('saveJsonBtn');
+    if (btn) btn.classList.toggle('has-unsaved', isJsonDirty() && !isSaving);
+    if (typeof updateFooter === 'function') updateFooter();
+}
+
+// Called whenever a different document lands in the editor: it starts clean,
+// and any save feedback from the previous document no longer applies.
+function noteJsonDocumentLoaded() {
+    jsonDocEpoch++;
+    jsonBaseline = jsonEditor ? jsonEditor.value : '';
+    // While a save of the previous page is still in flight the button keeps
+    // its "Saving…" state; it resolves to idle when that save finishes.
+    if (!isSaving) setSaveButton('idle');
+    else updateSaveIndicators();
+}
+
+// Closing the tab with unsaved edits loses them - let the browser ask.
+window.addEventListener('beforeunload', function (e) {
+    if (isJsonDirty() || isSaving) {
+        e.preventDefault();
+        e.returnValue = '';
+    }
+});
+
+function triggerSaveDialog(content, filename) {
     try {
-        const jsonData = JSON.parse(jsonEditor.value);
-        const filename = currentJsonFile || 'annotations.json';
+        const jsonData = JSON.parse(content != null ? content : jsonEditor.value);
+        const name = filename || currentJsonFile || 'annotations.json';
 
         const dataStr = JSON.stringify(jsonData, null, 2);
         const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
 
         const linkElement = document.createElement('a');
         linkElement.setAttribute('href', dataUri);
-        linkElement.setAttribute('download', filename);
+        linkElement.setAttribute('download', name);
         linkElement.click();
     } catch (error) {
-        alert('Error saving JSON: ' + error.message);
+        showToast('error', 'Could not prepare the download: ' + (error.message || error));
     }
 }
 
@@ -765,19 +911,17 @@ async function ensureWritePermission(handle) {
     return await handle.requestPermission({ mode: 'readwrite' }) === 'granted';
 }
 
-// Overwrites the mounted file in place. Returns 'written' on success,
+// Overwrites the given file in place. Returns 'written' on success,
 // 'no-handle' when there is nothing to write through (the caller then falls
-// back to a download), or 'denied' when write access was refused.
-async function writeToMountedFile() {
-    const handle = currentJsonHandle();
+// back to a download), or 'denied' when write access was refused. Handle and
+// content are passed in, captured when the save was requested, so paging to
+// another file mid-save can neither redirect the write nor change the payload.
+async function writeToMountedFile(handle, content) {
     if (!handle) return 'no-handle';
 
-    if (!await ensureWritePermission(handle)) {
-        alert('Permission to write to the annotation folder was declined, so the file was not saved.');
-        return 'denied';
-    }
+    if (!await ensureWritePermission(handle)) return 'denied';
 
-    const dataStr = JSON.stringify(JSON.parse(jsonEditor.value), null, 2);
+    const dataStr = JSON.stringify(JSON.parse(content), null, 2);
     const writable = await handle.createWritable();
     try {
         await writable.write(dataStr);
@@ -789,13 +933,28 @@ async function writeToMountedFile() {
     return 'written';
 }
 async function saveJSON() {
+    // A second click while a save is running would race the first write.
+    if (isSaving) return;
+
+    // Capture the document being saved NOW. currentJsonHandle() and the editor
+    // both follow the pager, so resolving them after an await would save the
+    // wrong page if the user navigates while a request is in flight.
+    const content = jsonEditor.value;
+    const fileName = currentJsonFile || 'annotations.json';
+    const handle = currentJsonHandle();
+    const epoch = jsonDocEpoch;
+
     let jsonData;
     try {
-        jsonData = JSON.parse(jsonEditor.value);
+        jsonData = JSON.parse(content);
     } catch (error) {
-        alert('Invalid JSON format: ' + (error.message || error));
+        showToast('error', 'Not saved — the JSON is invalid: ' + (error.message || error));
         return;
     }
+
+    isSaving = true;
+    setSaveButton('saving');
+    let savedShown = false;
 
     try {
         // Ensure payload is an array when submitting to validate_json
@@ -808,42 +967,46 @@ async function saveJSON() {
         });
 
         if (!response.ok) {
-            alert('Validation request failed');
+            showToast('error', fileName + ' was NOT saved: the validation request failed (HTTP ' + response.status + ').');
             return;
         }
 
         const result = await response.json();
-        if (result.error_count === 0) {
-            // Overwrite the mounted file in place; fall back to a download when
-            // the JSON came from the single-file upload button.
-            const outcome = await writeToMountedFile();
-            if (outcome === 'no-handle') {
-                triggerSaveDialog();
-            } else if (outcome === 'denied') {
-                return; // Already explained; no "Saved!" for a file that was not saved.
-            }
-            // show quick saved feedback
-            const saveBtn = document.getElementById('saveJsonBtn');
-            if (saveBtn) {
-                const originalHTML = saveBtn.innerHTML;
-                saveBtn.innerHTML = '<i data-lucide="check"></i> Saved!';
-                saveBtn.style.background = 'var(--success-solid)';
-                saveBtn.style.color = '#ffffff';
-                if (typeof lucide !== 'undefined') lucide.createIcons();
-                setTimeout(() => {
-                    saveBtn.innerHTML = originalHTML;
-                    saveBtn.style.background = '';
-                    saveBtn.style.color = '';
-                    if (typeof lucide !== 'undefined') lucide.createIcons();
-                }, 1400);
-            }
-        } else {
-            // Show errors in a popup/modal
+        if (result.error_count !== 0) {
+            // The modal states "Nothing was saved" and lists what to fix.
             const details = Array.isArray(result.error_detail) ? result.error_detail : [String(result.error_detail)];
             showValidationErrors(details);
+            return;
+        }
+
+        // Overwrite the mounted file in place; fall back to a download when
+        // the JSON came from the single-file upload button.
+        const outcome = await writeToMountedFile(handle, content);
+        if (outcome === 'denied') {
+            showToast('warning', fileName + ' was NOT saved: write permission to the folder was declined.');
+            return;
+        }
+        if (outcome === 'no-handle') {
+            triggerSaveDialog(content, fileName);
+            showToast('success', fileName + ' downloaded — mount a folder to save in place.');
+        } else {
+            showToast('success', 'Saved ' + fileName);
+        }
+
+        // Mark clean and flash "Saved" only if the same document is still on
+        // screen; edits typed while the save was in flight stay dirty because
+        // the baseline is the content that was actually written.
+        if (epoch === jsonDocEpoch) {
+            jsonBaseline = content;
+            setSaveButton('saved');
+            savedShown = true;
         }
     } catch (error) {
-        alert('Error saving JSON: ' + (error.message || error));
+        showToast('error', fileName + ' was NOT saved: ' + (error.message || error));
+    } finally {
+        isSaving = false;
+        if (!savedShown) setSaveButton('idle');
+        else updateSaveIndicators();
     }
 }
 
@@ -996,8 +1159,12 @@ document.addEventListener('keydown', function(e) {
         } else if (e.key === '0') {
             e.preventDefault();
             if (image) resetZoom();
+        } else if (e.key === 's') {
+            // Ctrl/Cmd+S saves the annotation instead of the web page.
+            e.preventDefault();
+            if (jsonEditor && jsonEditor.value.trim()) saveJSON();
         }
-        
+
         // Find and Replace toggle (Ctrl+H or Cmd+H)
         if ((e.ctrlKey || e.metaKey) && e.key === 'h') {
             e.preventDefault();
@@ -1397,20 +1564,26 @@ function updateFooter() {
 
     if (jsonEl) {
         const raw = jsonEditor ? jsonEditor.value.trim() : '';
+        // Saving state wins; then unsaved edits; then the parse status alone.
+        const dirtySuffix = typeof isSaving !== 'undefined' && isSaving
+            ? ' · <span class="footer-unsaved">Saving…</span>'
+            : (typeof isJsonDirty === 'function' && isJsonDirty()
+                ? ' · <span class="footer-unsaved">Unsaved changes</span>'
+                : '');
         if (!raw) {
-            jsonEl.textContent = 'JSON empty';
+            jsonEl.innerHTML = 'JSON empty' + dirtySuffix;
             jsonEl.style.color = '';
         } else {
             try {
                 const parsed = JSON.parse(raw);
                 const count = Array.isArray(parsed) ? parsed.length : null;
-                jsonEl.innerHTML = count === null
+                jsonEl.innerHTML = (count === null
                     ? 'JSON valid'
-                    : 'JSON valid · <strong>' + count + '</strong> entries';
+                    : 'JSON valid · <strong>' + count + '</strong> entries') + dirtySuffix;
                 jsonEl.style.color = '';
             } catch (e) {
-                jsonEl.textContent = 'JSON invalid';
-                jsonEl.style.color = 'var(--danger)';
+                jsonEl.innerHTML = '<span style="color: var(--danger)">JSON invalid</span>' + dirtySuffix;
+                jsonEl.style.color = '';
             }
         }
     }
@@ -1431,7 +1604,8 @@ function updateFooter() {
 document.addEventListener('DOMContentLoaded', function () {
     updateFooter();
     if (jsonEditor) {
-        jsonEditor.addEventListener('input', updateFooter);
+        // Refreshes the unsaved-dot on the save button and the footer status.
+        jsonEditor.addEventListener('input', updateSaveIndicators);
         // Keep the overlay in step with hand edits to the JSON.
         jsonEditor.addEventListener('input', refreshBoundingBoxes);
     }
@@ -1496,13 +1670,13 @@ async function mountImageFolder() {
         mountedImages = await readDirectory(dir, ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif']);
         if (mountedImages.size === 0) {
             mountedImages = null;
-            alert('That folder contains no images.');
+            showToast('warning', 'That folder contains no images.');
             return;
         }
         mountedImagesSource = 'local';
         await pairMountedFolders('image');
     } catch (e) {
-        alert('Could not read the image folder: ' + e.message);
+        showToast('error', 'Could not read the image folder: ' + (e.message || e));
     }
 }
 
@@ -1518,13 +1692,13 @@ async function mountJsonFolder() {
         mountedJson = await readDirectory(dir, ['json']);
         if (mountedJson.size === 0) {
             mountedJson = null;
-            alert('That folder contains no .json files.');
+            showToast('warning', 'That folder contains no .json files.');
             return;
         }
         mountedJsonSource = 'local';
         await pairMountedFolders('json');
     } catch (e) {
-        alert('Could not read the annotation folder: ' + e.message);
+        showToast('error', 'Could not read the annotation folder: ' + (e.message || e));
     }
 }
 
@@ -1630,13 +1804,21 @@ async function showImageAt(index) {
     if (!page.image) return;
 
     const token = ++imageLoadToken;
-    const file = await page.image.getFile();
-    const dataUrl = await new Promise(function (resolve, reject) {
-        const reader = new FileReader();
-        reader.onload = function () { resolve(reader.result); };
-        reader.onerror = function () { reject(reader.error); };
-        reader.readAsDataURL(file);
-    });
+    let file, dataUrl;
+    try {
+        file = await page.image.getFile();
+        dataUrl = await new Promise(function (resolve, reject) {
+            const reader = new FileReader();
+            reader.onload = function () { resolve(reader.result); };
+            reader.onerror = function () { reject(reader.error); };
+            reader.readAsDataURL(file);
+        });
+    } catch (e) {
+        if (token === imageLoadToken) {
+            showToast('error', 'Could not load the image for ' + page.base + ': ' + (e.message || e));
+        }
+        return;
+    }
 
     // A newer step superseded this one while the file was being read.
     if (token !== imageLoadToken) return;
@@ -1649,20 +1831,38 @@ let jsonLoadToken = 0;
 
 async function showJsonAt(index) {
     if (!mounted) return;
-    jsonIndex = Math.min(Math.max(index, 0), mounted.pages.length - 1);
-    const page = mounted.pages[jsonIndex];
+    const next = Math.min(Math.max(index, 0), mounted.pages.length - 1);
+    const page = mounted.pages[next];
 
+    // Loading a page replaces the editor, so unsaved edits would be lost
+    // silently. The index only moves once the user agrees to discard them.
+    if (page.annotation && isJsonDirty()) {
+        const name = currentJsonFile || 'the current file';
+        if (!confirm('Unsaved changes in ' + name + ' will be LOST.\n\nDiscard the changes and leave this page?')) {
+            return;
+        }
+    }
+
+    jsonIndex = next;
     updatePagers();
 
     // No annotation folder mounted yet - nothing to display on this side.
     if (!page.annotation) return;
 
     const token = ++jsonLoadToken;
-    const file = await page.annotation.getFile();
-    if (token !== jsonLoadToken) return;
-    const text = await file.text();
-    if (token !== jsonLoadToken) return;
-    currentJsonFile = file.name;
+    let text;
+    try {
+        const file = await page.annotation.getFile();
+        if (token !== jsonLoadToken) return;
+        text = await file.text();
+        if (token !== jsonLoadToken) return;
+        currentJsonFile = file.name;
+    } catch (e) {
+        if (token === jsonLoadToken) {
+            showToast('error', 'Could not load ' + page.base + '.json: ' + (e.message || e));
+        }
+        return;
+    }
     // The pager now owns the editor; any singly-loaded file is no longer shown.
     loadedJsonHandle = null;
 
@@ -1672,6 +1872,10 @@ async function showJsonAt(index) {
         // Show malformed files as-is so they can be inspected and fixed.
         jsonEditor.value = text;
     }
+
+    // A different document is on screen now: it starts clean, and any save
+    // feedback from the previous page no longer applies.
+    noteJsonDocumentLoaded();
 
     updatePagers();
     if (typeof updateFooter === 'function') updateFooter();
@@ -1815,7 +2019,7 @@ async function mountServerDirectory(kind, path) {
     });
 
     if (found.size === 0) {
-        alert('That server folder contains no ' + (kind === 'images' ? 'images.' : '.json files.'));
+        showToast('warning', 'That server folder contains no ' + (kind === 'images' ? 'images.' : '.json files.'));
         return false;
     }
 
@@ -2017,7 +2221,7 @@ async function mountFromServerBrowser() {
         closeServerBrowser();
         if (ok) await offerServerSibling(kind, path);
     } catch (e) {
-        alert('Could not mount the server folder: ' + (e.message || e));
+        showToast('error', 'Could not mount the server folder: ' + (e.message || e));
     }
 }
 

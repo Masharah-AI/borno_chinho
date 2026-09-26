@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BornoChinho</title>
     <link rel="icon" type="image/png" href="/static/images/logo_icon_128.png">
-    <link rel="stylesheet" href="/static/style.css">
+    <!-- The ?v= query busts browser caches when these files change; bump it
+         together with any edit to style.css or script.js. -->
+    <link rel="stylesheet" href="/static/style.css?v=20260926">
     <!-- Apply the saved theme before first paint so there is no flash -->
     <script>
         (function () {
@@ -296,6 +298,9 @@
                 </div>
                 <h3 class="about-subtitle">Shortcuts</h3>
                 <dl class="about-shortcuts">
+                    <dt><kbd>Ctrl</kbd> <kbd>S</kbd></dt>
+                    <dd>Save the annotation</dd>
+
                     <dt><kbd>Ctrl</kbd> <kbd>H</kbd></dt>
                     <dd>Find &amp; replace</dd>
 
@@ -368,7 +373,7 @@
         </div>
     </div>
 
-    <script src="/static/script.js"></script>
+    <script src="/static/script.js?v=20260926"></script>
     <script>
         // Initialize Lucide icons
         lucide.createIcons();
