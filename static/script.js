@@ -10,6 +10,10 @@
 // keeps the app fully usable minus the per-value RTL isolation.
 // ---------------------------------------------------------------------------
 let jsonCM = null;
+// True while the app itself replaces the editor text (loading a file, writing
+// a dragged box side). The cursor moves then too, but it is not the user
+// moving it, so the cursor -> box selection ignores it.
+let jsonTextIsBeingSet = false;
 
 function createJsonEditor(textarea) {
     if (!textarea || typeof CodeMirror === 'undefined') return textarea;
@@ -38,8 +42,13 @@ function createJsonEditor(textarea) {
             // Preserve the cursor so programmatic refreshes (updateJSON on every
             // box edit) don't yank the caret to the top while the user types.
             const cursor = jsonCM.getCursor();
-            jsonCM.setValue(v == null ? '' : String(v));
-            jsonCM.setCursor(cursor);
+            jsonTextIsBeingSet = true;
+            try {
+                jsonCM.setValue(v == null ? '' : String(v));
+                jsonCM.setCursor(cursor);
+            } finally {
+                jsonTextIsBeingSet = false;
+            }
         },
 
         get classList() { return wrapper.classList; },
@@ -97,8 +106,8 @@ const categoryColors = {
 
 fileInput.addEventListener('change', uploadImage);
 jsonFileInput.addEventListener('change', uploadJSONFile);
-canvas.addEventListener('mousedown', startDrawing);
-canvas.addEventListener('mousemove', draw);
+canvas.addEventListener('mousedown', onCanvasMouseDown);
+canvas.addEventListener('mousemove', onCanvasMouseMove);
 canvas.addEventListener('mouseup', stopDrawing);
 canvas.addEventListener('mouseleave', stopDrawing);
 
@@ -165,6 +174,8 @@ async function displayJSONFile(file) {
 
     const data = await response.json();
     currentJsonFile = data.name || file.name;
+    // A selection points into the old file's entries.
+    clearBoxSelection();
     jsonEditor.value = JSON.stringify(data.content, null, 2);
     // A freshly loaded file starts clean.
     noteJsonDocumentLoaded();
@@ -299,8 +310,8 @@ function displayImage() {
         );
     });
 
-    // Read-only layer from the loaded JSON, drawn on top of the hand-drawn
-    // rectangles. No-op while the toggle is off.
+    // Layer from the loaded JSON, drawn on top of the hand-drawn rectangles.
+    // No-op while the toggle is off.
     drawBoundingBoxes();
 
     document.getElementById('zoomLevel').textContent = `${Math.round(zoomLevel * 100)}%`;
@@ -348,6 +359,22 @@ function getMousePos(event) {
         x: (event.clientX - rect.left) * scaleX,
         y: (event.clientY - rect.top) * scaleY
     };
+}
+
+// A press inside a JSON box selects or edits it; anywhere else draws as before.
+function onCanvasMouseDown(event) {
+    if (startBoxEdit(event)) return;
+    startDrawing(event);
+}
+
+function onCanvasMouseMove(event) {
+    // A side drag is tracked on the window, so it can run past the canvas edge.
+    if (bboxDrag) return;
+    if (isDrawing) {
+        draw(event);
+        return;
+    }
+    updateCanvasCursor(event);
 }
 
 function startDrawing(event) {
@@ -406,22 +433,19 @@ function stopDrawing(event) {
 function drawRectangle(x1, y1, x2, y2, color, isSelected) {
     ctx.strokeStyle = color;
     ctx.lineWidth = isSelected ? 4 : 3;
-    
-    if (isSelected) {
-        ctx.shadowColor = color;
-        ctx.shadowBlur = 12;
-    }
-    
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    ctx.shadowBlur = 0;
 }
 
 // ---------------------------------------------------------------------------
 // Bounding box overlay
-// A read-only layer drawn from whatever is currently in the JSON editor, so it
-// follows both the single-file Load and the mounted-folder pager, and picks up
-// manual edits to the text. Entries without a usable bbox are skipped, which
-// makes a partially-annotated file draw only the boxes it actually has.
+// A layer drawn from whatever is currently in the JSON editor, so it follows
+// both the single-file Load and the mounted-folder pager, and picks up manual
+// edits to the text. Entries without a usable bbox are skipped, which makes a
+// partially-annotated file draw only the boxes it actually has.
+//
+// Boxes are editable: clicking inside one selects it, and dragging a side of
+// the selected box writes the new coordinate back into the editor (see
+// "Bounding box editing" below). Nothing reaches the disk until Save.
 // ---------------------------------------------------------------------------
 let showBoundingBoxes = false;
 
@@ -476,8 +500,214 @@ function parseBBox(entry) {
     return { x1: x1, y1: y1, x2: x2, y2: y2, category: entry.category };
 }
 
+// Keys a wrapper object may hold the entries array under, in priority order.
+const JSON_ENTRY_KEYS = ['entries', 'annotations', 'elements', 'rectangles', 'data'];
+
+// Where the entries array sits in parsed JSON: [] for a top-level array,
+// [key] inside a wrapper object, or null for a single bare entry.
+function getEntriesPath(parsed) {
+    if (Array.isArray(parsed)) return [];
+    if (parsed && typeof parsed === 'object') {
+        // The first key holding anything wins, even if that is not an array.
+        const key = JSON_ENTRY_KEYS.find(function (k) { return parsed[k]; });
+        if (key && Array.isArray(parsed[key])) return [key];
+    }
+    return null;
+}
+
+// The array of entries inside parsed JSON. Top level is normally that array;
+// also accept a wrapper object holding it under a common key, or a single
+// bare entry. Returns references into `parsed`, so edits to an entry land in
+// `parsed` itself.
+function getJsonEntries(parsed) {
+    const path = getEntriesPath(parsed);
+    if (path === null) return [parsed];
+    return path.length ? parsed[path[0]] : parsed;
+}
+
+// Path from the document root to one entry, for locateJsonValue().
+function getEntryPath(parsed, entryIndex) {
+    const path = getEntriesPath(parsed);
+    return path === null ? [] : path.concat(entryIndex);
+}
+
+// Character range { start, end } (end exclusive) of the value at `path`, a
+// list of object keys and array indexes, inside the JSON `text`. Null when the
+// path does not exist.
+function locateJsonValue(text, path) {
+    const scanner = createJsonScanner(text);
+    return scanner.descend(path) ? scanner.readValue() : null;
+}
+
+// Character ranges of every element of the array at `path`, in one pass.
+// Null when the path does not exist or is not an array.
+function locateJsonElements(text, path) {
+    const scanner = createJsonScanner(text);
+    return scanner.descend(path) ? scanner.readElements() : null;
+}
+
+// Index of the entry at character `offset` in the JSON `text`, or null when
+// the offset is outside every entry or the text does not parse. A line an
+// entry starts or ends on counts as that entry's, so a click in the indent
+// before "{" or after "}," still lands on it.
+function findEntryAt(text, offset) {
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    } catch (e) {
+        return null;
+    }
+
+    const base = getEntriesPath(parsed);
+    if (base === null) return 0; // A single bare entry is the whole document.
+
+    const ranges = locateJsonElements(text, base);
+    if (!ranges) return null;
+
+    for (let index = 0; index < ranges.length; index++) {
+        if (offset >= ranges[index].start && offset <= ranges[index].end) return index;
+    }
+
+    const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+    let lineEnd = text.indexOf('\n', offset);
+    if (lineEnd < 0) lineEnd = text.length;
+
+    // Several entries can share a line in compact JSON; the nearest wins.
+    let best = null;
+    let bestDistance = Infinity;
+    ranges.forEach(function (range, index) {
+        if (range.start > lineEnd || range.end < lineStart) return;
+        const distance = offset < range.start ? range.start - offset : offset - range.end;
+        if (distance < bestDistance) {
+            best = index;
+            bestDistance = distance;
+        }
+    });
+    return best;
+}
+
+// A cursor over JSON text that steps over values without parsing them, so
+// the offsets it reports hold whatever formatting the editor has. Expects
+// valid JSON.
+function createJsonScanner(text) {
+    let i = 0;
+
+    function skipSpace() {
+        while (i < text.length) {
+            const c = text[i];
+            if (c !== ' ' && c !== '\n' && c !== '\r' && c !== '\t') return;
+            i++;
+        }
+    }
+
+    function skipString() {
+        i++; // opening quote
+        while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
+        i++; // closing quote
+    }
+
+    function skipValue() {
+        const c = text[i];
+        if (c === '"') {
+            skipString();
+        } else if (c === '{' || c === '[') {
+            let depth = 0;
+            while (i < text.length) {
+                const ch = text[i];
+                if (ch === '"') {
+                    skipString();
+                    continue;
+                }
+                i++;
+                if (ch === '{' || ch === '[') depth++;
+                else if ((ch === '}' || ch === ']') && --depth === 0) return;
+            }
+        } else {
+            // Number, true, false or null.
+            while (i < text.length && !/[\s,\]}]/.test(text[i])) i++;
+        }
+    }
+
+    // Moves onto the value at `path` (object keys and array indexes) from the
+    // top of the document. False when the path does not exist.
+    function descend(path) {
+        i = 0;
+        skipSpace();
+        for (const step of path) {
+            if (typeof step === 'number') {
+                if (text[i] !== '[') return false;
+                i++;
+                for (let n = 0; ; n++) {
+                    skipSpace();
+                    if (i >= text.length || text[i] === ']') return false;
+                    if (n === step) break;
+                    skipValue();
+                    skipSpace();
+                    if (text[i] !== ',') return false;
+                    i++;
+                }
+            } else {
+                if (text[i] !== '{') return false;
+                i++;
+                // JSON.parse keeps the last of duplicate keys, so this does too.
+                let match = -1;
+                for (;;) {
+                    skipSpace();
+                    if (i >= text.length || text[i] !== '"') break;
+                    const keyStart = i;
+                    skipString();
+                    let key;
+                    try {
+                        key = JSON.parse(text.slice(keyStart, i));
+                    } catch (e) {
+                        return false;
+                    }
+                    skipSpace();
+                    if (text[i] !== ':') return false;
+                    i++;
+                    skipSpace();
+                    if (key === step) match = i;
+                    skipValue();
+                    skipSpace();
+                    if (text[i] === ',') i++;
+                }
+                if (match < 0) return false;
+                i = match;
+            }
+        }
+        return true;
+    }
+
+    // Range of the value at the current position.
+    function readValue() {
+        const start = i;
+        skipValue();
+        return { start: start, end: i };
+    }
+
+    // Ranges of the elements of the array at the current position, or null
+    // when it is not an array.
+    function readElements() {
+        if (text[i] !== '[') return null;
+        i++;
+        const ranges = [];
+        for (;;) {
+            skipSpace();
+            if (i >= text.length || text[i] === ']') return ranges;
+            ranges.push(readValue());
+            skipSpace();
+            if (text[i] !== ',') return ranges;
+            i++;
+        }
+    }
+
+    return { descend: descend, readValue: readValue, readElements: readElements };
+}
+
 // Every drawable box in the editor's current contents. Returns [] for empty,
 // malformed, or bbox-free JSON, so the caller never has to special-case them.
+// Each box carries `entryIndex`, its position in the file, which differs from
+// its position in this list whenever an earlier entry has no usable bbox.
 function getJsonBoundingBoxes() {
     const raw = jsonEditor ? jsonEditor.value.trim() : '';
     if (!raw) return [];
@@ -489,21 +719,20 @@ function getJsonBoundingBoxes() {
         return []; // Mid-edit or malformed - nothing to draw.
     }
 
-    // Top level is normally the array of entries; also accept a wrapper object
-    // holding that array under a common key.
-    let entries = parsed;
-    if (!Array.isArray(entries) && parsed && typeof parsed === 'object') {
-        entries = parsed.entries || parsed.annotations || parsed.elements
-            || parsed.rectangles || parsed.data;
-    }
-    if (!Array.isArray(entries)) entries = [parsed];
-
     const boxes = [];
-    entries.forEach(function (entry) {
+    getJsonEntries(parsed).forEach(function (entry, entryIndex) {
         const box = parseBBox(entry);
-        if (box) boxes.push(box);
+        if (box) {
+            box.entryIndex = entryIndex;
+            boxes.push(box);
+        }
     });
     return boxes;
+}
+
+function getBBoxColor(box) {
+    const key = typeof box.category === 'string' ? box.category.toLowerCase() : '';
+    return bboxColors[key] || bboxFallbackColor;
 }
 
 // Draws the overlay at the current zoom. Called from displayImage(), so it
@@ -518,10 +747,15 @@ function drawBoundingBoxes() {
     ctx.setLineDash([6, 4]);
     ctx.lineWidth = 2;
 
-    boxes.forEach(function (box, index) {
-        const key = typeof box.category === 'string' ? box.category.toLowerCase() : '';
-        const color = bboxColors[key] || bboxFallbackColor;
+    let selected = null;
+    boxes.forEach(function (box) {
+        // The selected box is drawn last, so it sits on top of its neighbours.
+        if (box.entryIndex === selectedBoxEntry) {
+            selected = box;
+            return;
+        }
 
+        const color = getBBoxColor(box);
         const x = box.x1 * zoomLevel;
         const y = box.y1 * zoomLevel;
         const w = (box.x2 - box.x1) * zoomLevel;
@@ -530,10 +764,43 @@ function drawBoundingBoxes() {
         ctx.strokeStyle = color;
         ctx.strokeRect(x, y, w, h);
 
-        drawBBoxLabel(x, y, color, box.category || 'Box', index + 1);
+        // Numbered by entry, matching the "Entry N" of validation errors.
+        drawBBoxLabel(x, y, color, box.category || 'Box', box.entryIndex + 1);
     });
 
+    if (selected) drawSelectedBBox(selected);
+
     ctx.restore();
+}
+
+// The box being edited: a solid outline with a handle on each draggable side.
+// While a side is mid-drag the live coordinates replace the editor's, which
+// are only updated when the drag ends.
+function drawSelectedBBox(box) {
+    const live = bboxDrag ? bboxDrag.box : box;
+    const color = getBBoxColor(box);
+
+    const x1 = live.x1 * zoomLevel;
+    const y1 = live.y1 * zoomLevel;
+    const x2 = live.x2 * zoomLevel;
+    const y2 = live.y2 * zoomLevel;
+
+    ctx.setLineDash([]);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = color;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+    const midX = (x1 + x2) / 2;
+    const midY = (y1 + y2) / 2;
+    const size = 8;
+    ctx.fillStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    [[x1, midY], [x2, midY], [midX, y1], [midX, y2]].forEach(function (point) {
+        ctx.fillRect(point[0] - size / 2, point[1] - size / 2, size, size);
+        ctx.strokeRect(point[0] - size / 2, point[1] - size / 2, size, size);
+    });
+
+    drawBBoxLabel(x1, y1, color, box.category || 'Box', box.entryIndex + 1);
 }
 
 // A small tag above each box; tucked inside the box when it would fall off the
@@ -571,6 +838,8 @@ function refreshBoundingBoxes() {
 
 function toggleBoundingBoxes() {
     showBoundingBoxes = !showBoundingBoxes;
+    // Hidden boxes cannot be edited.
+    if (!showBoundingBoxes) clearBoxSelection();
 
     const btn = document.getElementById('showBoxesBtn');
     if (btn) {
@@ -602,9 +871,391 @@ function updateBoundingBoxStatus() {
         el.textContent = 'No bounding boxes in JSON';
         el.style.color = 'var(--text-secondary)';
     } else {
-        el.innerHTML = '<strong>' + n + '</strong> ' + (n === 1 ? 'box' : 'boxes') + ' shown';
+        let label = '<strong>' + n + '</strong> ' + (n === 1 ? 'box' : 'boxes') + ' shown';
+        if (selectedBoxEntry !== null) label += ' · editing entry ' + (selectedBoxEntry + 1);
+        el.innerHTML = label;
         el.style.color = '';
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bounding box editing
+// Clicking inside a JSON box selects it; a click inside several picks the
+// smallest, so a box nested in a larger one can still be reached. Dragging a
+// side of the selected box moves only that side, and on release writes the
+// one coordinate back into the editor. Saving to disk stays with Save, which
+// validates first.
+// ---------------------------------------------------------------------------
+let selectedBoxEntry = null;  // entryIndex of the selected JSON box
+let bboxDrag = null;          // { entryIndex, side, key, box, original, offset }
+
+// How close, in canvas pixels, the pointer must be to a side to grab it.
+// Measured on screen so the sides stay easy to grab at any zoom.
+const BBOX_SIDE_REACH = 6;
+
+// The bbox coordinate each side controls.
+const BBOX_SIDE_KEYS = { left: 'x1', right: 'x2', top: 'y1', bottom: 'y2' };
+
+function findJsonBox(boxes, entryIndex) {
+    for (let i = 0; i < boxes.length; i++) {
+        if (boxes[i].entryIndex === entryIndex) return boxes[i];
+    }
+    return null;
+}
+
+// The smallest box containing the image-space point, or null.
+function hitTestJsonBoxes(boxes, x, y) {
+    let best = null;
+    let bestArea = Infinity;
+    boxes.forEach(function (box) {
+        if (x < box.x1 || x > box.x2 || y < box.y1 || y > box.y2) return;
+        const area = (box.x2 - box.x1) * (box.y2 - box.y1);
+        if (area < bestArea) {
+            best = box;
+            bestArea = area;
+        }
+    });
+    return best;
+}
+
+// Which side of `box` lies under the canvas-space point, or null. Near a
+// corner, the closer of the two sides wins.
+function hitTestBoxSide(box, px, py) {
+    const reach = BBOX_SIDE_REACH;
+    const x1 = box.x1 * zoomLevel;
+    const y1 = box.y1 * zoomLevel;
+    const x2 = box.x2 * zoomLevel;
+    const y2 = box.y2 * zoomLevel;
+
+    const candidates = [];
+    if (py >= y1 - reach && py <= y2 + reach) {
+        candidates.push({ side: 'left', distance: Math.abs(px - x1) });
+        candidates.push({ side: 'right', distance: Math.abs(px - x2) });
+    }
+    if (px >= x1 - reach && px <= x2 + reach) {
+        candidates.push({ side: 'top', distance: Math.abs(py - y1) });
+        candidates.push({ side: 'bottom', distance: Math.abs(py - y2) });
+    }
+
+    let best = null;
+    candidates.forEach(function (c) {
+        if (c.distance <= reach && (!best || c.distance < best.distance)) best = c;
+    });
+    return best ? best.side : null;
+}
+
+function sideCursor(side) {
+    return side === 'left' || side === 'right' ? 'ew-resize' : 'ns-resize';
+}
+
+// The selected box as it currently stands: live while a side is mid-drag,
+// otherwise as the editor has it. Null when nothing is selected.
+function getSelectedJsonBox() {
+    if (selectedBoxEntry === null) return null;
+    if (bboxDrag) return bboxDrag.box;
+    return findJsonBox(getJsonBoundingBoxes(), selectedBoxEntry);
+}
+
+// `fromEditor` is set when the selection came from the cursor in the JSON
+// editor: the entry is already in front of the user, so it is highlighted
+// but the editor is not scrolled.
+function selectJsonBox(entryIndex, fromEditor) {
+    selectedBoxEntry = entryIndex;
+    // One selection at a time: the hand-drawn rectangle lets go.
+    selectedAnnotation = null;
+    if (cooridnatesPanel) cooridnatesPanel.style.display = 'block';
+    displayImage();
+    updateCoordinatesDisplay();
+    updateBoundingBoxStatus();
+    if (fromEditor) highlightJsonEntry(entryIndex);
+    else revealJsonEntry(entryIndex);
+}
+
+// Lines of the editor highlighted as the selected box's entry.
+let entryHighlightLines = [];
+
+// Breathing room, in pixels, kept around an entry scrolled into view.
+const ENTRY_REVEAL_MARGIN = 24;
+
+function clearEntryHighlight() {
+    if (!jsonCM) return;
+    entryHighlightLines.forEach(function (handle) {
+        // Lines replaced since (every box edit rewrites the text) are gone.
+        if (jsonCM.getLineNumber(handle) !== null) {
+            jsonCM.removeLineClass(handle, 'background', 'cm-selected-entry');
+        }
+    });
+    entryHighlightLines = [];
+}
+
+// Highlights an entry's lines in the editor, replacing any earlier highlight.
+// Returns where the entry sits, for scrolling, or null when it cannot be found.
+// Needs CodeMirror; the textarea fallback is left be.
+function highlightJsonEntry(entryIndex) {
+    if (!jsonCM) return null;
+    clearEntryHighlight();
+
+    const text = jsonCM.getValue();
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    } catch (e) {
+        return null;
+    }
+
+    const path = getEntryPath(parsed, entryIndex);
+    const range = locateJsonValue(text, path);
+    if (!range) return null;
+
+    const from = jsonCM.posFromIndex(range.start);
+    const to = jsonCM.posFromIndex(range.end);
+    for (let line = from.line; line <= to.line; line++) {
+        entryHighlightLines.push(jsonCM.addLineClass(line, 'background', 'cm-selected-entry'));
+    }
+    return { text: text, path: path, from: from, to: to };
+}
+
+// Highlights an entry and scrolls the editor the least distance that brings
+// it into view - not at all when it is already showing. An entry taller than
+// the editor brings its bbox into view instead, since those are the numbers
+// being edited.
+function revealJsonEntry(entryIndex) {
+    const entry = highlightJsonEntry(entryIndex);
+    if (!entry) return;
+
+    let target = { from: entry.from, to: entry.to };
+    const height = jsonCM.charCoords(entry.to, 'local').bottom
+        - jsonCM.charCoords(entry.from, 'local').top;
+    if (height > jsonCM.getScrollInfo().clientHeight - 2 * ENTRY_REVEAL_MARGIN) {
+        const bbox = locateJsonValue(entry.text, entry.path.concat('bbox'));
+        if (bbox) {
+            target = { from: jsonCM.posFromIndex(bbox.start), to: jsonCM.posFromIndex(bbox.end) };
+        }
+    }
+    jsonCM.scrollIntoView(target, ENTRY_REVEAL_MARGIN);
+}
+
+// Scrolls the image the least distance that shows `box`, so a box selected
+// from the editor is not left off-screen on a zoomed-in page. The top-left
+// corner wins when the box is larger than the view.
+function revealBoxOnCanvas(box) {
+    const area = document.querySelector('.canvas-area');
+    if (!area) return;
+
+    const view = area.getBoundingClientRect();
+    const c = canvas.getBoundingClientRect();
+    const scale = (c.width / canvas.width) * zoomLevel; // image px -> screen px
+    const margin = ENTRY_REVEAL_MARGIN;
+
+    function offset(start, end, viewStart, viewSize) {
+        const viewEnd = viewStart + viewSize;
+        if (start < viewStart + margin) return start - viewStart - margin;
+        if (end > viewEnd - margin) return Math.min(end - viewEnd + margin, start - viewStart - margin);
+        return 0;
+    }
+
+    area.scrollBy(
+        offset(c.left + box.x1 * scale, c.left + box.x2 * scale, view.left + area.clientLeft, area.clientWidth),
+        offset(c.top + box.y1 * scale, c.top + box.y2 * scale, view.top + area.clientTop, area.clientHeight)
+    );
+}
+
+// The editor -> image direction. With the boxes showing, putting the cursor
+// in an entry (click, arrow keys, find) highlights it and selects its box; an
+// entry without a usable bbox is highlighted with no box selected. Text the
+// app rewrites itself is not the user's cursor and is skipped (see
+// jsonTextIsBeingSet).
+function onEditorCursorActivity() {
+    if (jsonTextIsBeingSet || !showBoundingBoxes || bboxDrag) return;
+
+    const entryIndex = findEntryAt(jsonCM.getValue(), jsonCM.indexFromPos(jsonCM.getCursor()));
+    if (entryIndex === null) return; // e.g. on the opening "[" line
+
+    // Selecting can show or hide the coordinates panel above the editor, which
+    // resizes the editor from the top and would shift the text under the
+    // user's pointer. Note where the cursor's line sits so it can stay put.
+    const anchor = jsonCM.cursorCoords(null, 'window').top;
+
+    const box = findJsonBox(getJsonBoundingBoxes(), entryIndex);
+    if (!box) {
+        clearBoxSelection();
+        highlightJsonEntry(entryIndex);
+    } else if (entryIndex !== selectedBoxEntry) {
+        selectJsonBox(entryIndex, true);
+        revealBoxOnCanvas(box);
+    } else {
+        // Same entry: refresh, so lines typed into it pick up the highlight.
+        highlightJsonEntry(entryIndex);
+    }
+
+    const shift = jsonCM.cursorCoords(null, 'window').top - anchor;
+    if (shift) jsonCM.scrollTo(null, jsonCM.getScrollInfo().top + shift);
+}
+
+// Drops the selection, abandoning any drag in progress without writing it.
+// Safe to call when nothing is selected.
+function clearBoxSelection() {
+    if (bboxDrag) {
+        stopBoxDragTracking();
+        bboxDrag = null;
+    }
+    // An entry can be highlighted with no box selected (the cursor sits in an
+    // entry without a bbox), so this goes before the early return.
+    clearEntryHighlight();
+    if (selectedBoxEntry === null) return;
+
+    selectedBoxEntry = null;
+    if (cooridnatesPanel) cooridnatesPanel.style.display = rectangles.length > 0 ? 'block' : 'none';
+    canvas.style.cursor = '';
+    displayImage();
+    updateCoordinatesDisplay();
+    updateBoundingBoxStatus();
+}
+
+// Handles a press on the canvas. Returns true when it was meant for a JSON box
+// (a side grab or a selection), false when the caller should start drawing.
+function startBoxEdit(event) {
+    if (!showBoundingBoxes || !image || event.button !== 0) return false;
+
+    const pos = getMousePos(event);
+    const boxes = getJsonBoundingBoxes();
+
+    // A side of the selected box takes priority over anything beneath it.
+    const selected = findJsonBox(boxes, selectedBoxEntry);
+    const side = selected ? hitTestBoxSide(selected, pos.x, pos.y) : null;
+    if (side) {
+        event.preventDefault(); // no text selection while dragging
+        const key = BBOX_SIDE_KEYS[side];
+        const pointer = (key[0] === 'x' ? pos.x : pos.y) / zoomLevel;
+        bboxDrag = {
+            entryIndex: selected.entryIndex,
+            side: side,
+            key: key,
+            box: { x1: selected.x1, y1: selected.y1, x2: selected.x2, y2: selected.y2 },
+            original: selected[key],
+            // Where on the side it was grabbed, so the side does not jump to
+            // the pointer on the first move.
+            offset: selected[key] - pointer
+        };
+        document.body.style.cursor = sideCursor(side);
+        window.addEventListener('mousemove', onBoxDragMove);
+        window.addEventListener('mouseup', onBoxDragEnd);
+        return true;
+    }
+
+    const hit = hitTestJsonBoxes(boxes, pos.x / zoomLevel, pos.y / zoomLevel);
+    if (hit) {
+        // Clicking the selected box again brings its entry back into view, in
+        // case the editor has been scrolled away from it.
+        if (hit.entryIndex !== selectedBoxEntry) selectJsonBox(hit.entryIndex);
+        else revealJsonEntry(hit.entryIndex);
+        return true;
+    }
+
+    // Outside every box: let go of the selection and draw instead.
+    clearBoxSelection();
+    return false;
+}
+
+function onBoxDragMove(event) {
+    if (!bboxDrag) return;
+
+    const pos = getMousePos(event);
+    const box = bboxDrag.box;
+    const pointer = (bboxDrag.key[0] === 'x' ? pos.x : pos.y) / zoomLevel;
+    const value = Math.round(pointer + bboxDrag.offset);
+
+    // Keep the box at least 1px across and on the image. The validator needs
+    // every coordinate above zero, so 1 is the floor rather than 0.
+    switch (bboxDrag.side) {
+        case 'left':   box.x1 = clamp(value, 1, box.x2 - 1); break;
+        case 'right':  box.x2 = clamp(value, box.x1 + 1, Math.max(image.width, box.x1 + 1)); break;
+        case 'top':    box.y1 = clamp(value, 1, box.y2 - 1); break;
+        case 'bottom': box.y2 = clamp(value, box.y1 + 1, Math.max(image.height, box.y1 + 1)); break;
+    }
+
+    displayImage();
+    updateCoordinatesDisplay();
+}
+
+function onBoxDragEnd() {
+    if (!bboxDrag) return;
+
+    stopBoxDragTracking();
+    const drag = bboxDrag;
+    bboxDrag = null;
+
+    const value = drag.box[drag.key];
+    if (value !== drag.original) writeBBoxSide(drag.entryIndex, drag.key, value);
+
+    displayImage();
+    updateCoordinatesDisplay();
+    // Rewriting the text drops the highlight and scrolls the editor back to
+    // its cursor, so put the entry back in view.
+    revealJsonEntry(drag.entryIndex);
+}
+
+function stopBoxDragTracking() {
+    window.removeEventListener('mousemove', onBoxDragMove);
+    window.removeEventListener('mouseup', onBoxDragEnd);
+    document.body.style.cursor = '';
+}
+
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+}
+
+// Writes one coordinate of an entry's bbox back into the editor, leaving the
+// other three exactly as they were. `key` is the side's normalised name
+// (x1 = left, x2 = right, ...); in a file with swapped corners the left edge
+// is stored at index 2, so the stored order decides which slot it maps to.
+function writeBBoxSide(entryIndex, key, value) {
+    let parsed;
+    try {
+        parsed = JSON.parse(jsonEditor.value);
+    } catch (e) {
+        return false; // The text changed under the drag; nothing safe to write.
+    }
+
+    const entry = getJsonEntries(parsed)[entryIndex];
+    if (!entry || !Array.isArray(entry.bbox)) return false;
+
+    // A nested single box, e.g. "bbox": [[x1, y1, x2, y2]], keeps its nesting.
+    const target = entry.bbox.length === 1 && Array.isArray(entry.bbox[0])
+        ? entry.bbox[0]
+        : entry.bbox;
+    if (target.length < 4) return false;
+
+    const pair = key[0] === 'x' ? [0, 2] : [1, 3];
+    const lowFirst = Number(target[pair[0]]) <= Number(target[pair[1]]);
+    const wantsLow = key[1] === '1';
+    target[wantsLow === lowFirst ? pair[0] : pair[1]] = value;
+
+    // One change per drag, so a single undo in the editor reverts it.
+    jsonEditor.value = JSON.stringify(parsed, null, 2);
+    return true;
+}
+
+// Hints what a press would do at the pointer: grab a side, select a box, or
+// (the stylesheet's crosshair) draw.
+function updateCanvasCursor(event) {
+    let cursor = '';
+
+    if (showBoundingBoxes && image) {
+        const pos = getMousePos(event);
+        const boxes = getJsonBoundingBoxes();
+        const selected = findJsonBox(boxes, selectedBoxEntry);
+        const side = selected ? hitTestBoxSide(selected, pos.x, pos.y) : null;
+
+        if (side) {
+            cursor = sideCursor(side);
+        } else {
+            const hit = hitTestJsonBoxes(boxes, pos.x / zoomLevel, pos.y / zoomLevel);
+            if (hit) cursor = hit.entryIndex === selectedBoxEntry ? 'default' : 'pointer';
+        }
+    }
+
+    canvas.style.cursor = cursor;
 }
 
 function updateAnnotationsList() {
@@ -667,7 +1318,23 @@ function selectAnnotation(index) {
 
 function updateCoordinatesDisplay() {
     const coordinatesDisplay = document.getElementById('coordinatesDisplay');
-    
+
+    // A selected JSON box takes the panel, live while one of its sides moves.
+    const jsonBox = getSelectedJsonBox();
+    if (jsonBox) {
+        coordinatesDisplay.innerHTML = `
+            <div class="coord-item">
+                <div class="coord-label">Upper-Left Point</div>
+                <div class="coord-value">X: ${jsonBox.x1}, Y: ${jsonBox.y1}</div>
+            </div>
+            <div class="coord-item">
+                <div class="coord-label">Bottom-Right Point</div>
+                <div class="coord-value">X: ${jsonBox.x2}, Y: ${jsonBox.y2}</div>
+            </div>
+        `;
+        return;
+    }
+
     if (selectedAnnotation === null || !rectangles[selectedAnnotation]) {
         coordinatesDisplay.innerHTML = `
             <div class="coord-empty">
@@ -1481,6 +2148,9 @@ document.addEventListener('keydown', function (e) {
 
     const validation = document.getElementById('validationErrorsModal');
     if (validation) validation.remove();
+
+    // Lets go of the JSON box being edited (a drag in progress is abandoned).
+    clearBoxSelection();
 });
 
 // ---------------------------------------------------------------------------
@@ -1609,6 +2279,8 @@ document.addEventListener('DOMContentLoaded', function () {
         // Keep the overlay in step with hand edits to the JSON.
         jsonEditor.addEventListener('input', refreshBoundingBoxes);
     }
+    // The cursor in an entry selects its box (needs CodeMirror's events).
+    if (jsonCM) jsonCM.on('cursorActivity', onEditorCursorActivity);
 });
 
 // ---------------------------------------------------------------------------
@@ -1865,6 +2537,8 @@ async function showJsonAt(index) {
     }
     // The pager now owns the editor; any singly-loaded file is no longer shown.
     loadedJsonHandle = null;
+    // A selection points into the old file's entries.
+    clearBoxSelection();
 
     try {
         jsonEditor.value = JSON.stringify(JSON.parse(text), null, 2);

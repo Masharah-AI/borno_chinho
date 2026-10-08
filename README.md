@@ -10,6 +10,7 @@ A web-based image annotation tool for document layout datasets. Draw bounding bo
 ## Features
 
 - **Draw and edit boxes** over an uploaded image, with zoom, pan, and multi-image paging
+- **Drag box sides on the image** — select a box from the JSON and move its sides; the coordinates update in the editor, ready to Save. Selecting a box highlights its entry in the editor, and putting the cursor in an entry selects its box
 - **Live JSON editor** beside the canvas, with find & replace (`Ctrl`+`H`)
 - **Validation** of annotation schema, category names, and bbox coordinates
 - **HTML table style checking** for `Table` annotations (CSS property validation)
@@ -80,7 +81,8 @@ Categories, expected font sizes, and allowed CSS styles are configurable in [con
 | `Ctrl`+`H` | Find & replace in the JSON editor |
 | `Ctrl`+`+` / `Ctrl`+`-` | Zoom in / out |
 | `Ctrl`+`0` | Reset zoom |
-| `Delete` | Remove the selected box |
+| `Delete` | Remove the selected drawn rectangle |
+| `Escape` | Deselect the box being edited |
 | `←` / `→` | Resize panes (when the divider is focused) |
 
 Drag the divider between panes to resize; double-click it to restore the 60/40 split.
