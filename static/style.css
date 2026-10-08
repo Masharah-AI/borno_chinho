@@ -283,13 +283,18 @@ body {
 }
 
 /* Centre the artboard while it is smaller than the viewport, but let it
-   grow and scroll naturally once the image is zoomed past the edges. */
+   grow and scroll naturally once the image is zoomed past the edges.
+   The auto margins do the centring and fall back to zero on overflow. The
+   wrapper must not also centre its own content: it is capped at the
+   viewport's width, so a wider canvas inside it would spill past its left
+   edge too, where no scrollbar can reach. Starting the content at the left
+   sends all of the overflow to the right, which scrolls. */
 .canvas-wrapper {
     position: relative;
     margin: auto;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     max-width: 100%;
 }
 
@@ -788,6 +793,11 @@ body.is-resizing canvas {
 #jsonEditor .cm-number { color: var(--json-number); }
 #jsonEditor .cm-atom { color: var(--json-boolean); }
 #jsonEditor .cm-property { color: var(--json-key); }
+
+/* Lines of the entry whose box is selected on the image. */
+#jsonEditor .cm-selected-entry {
+    background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+}
 
 /* JSON Syntax Highlighting */
 .json-string {

@@ -44,16 +44,34 @@ The first time you save into a mounted folder, the browser asks for write permis
 
 ## Reviewing annotations
 
-Click **Show Boxes** to draw every box from the JSON editor onto the image. Each box is colored by category and labeled with its category and index:
+Click **Show Boxes** to draw every box from the JSON editor onto the image. Each box is colored by category and labeled with its category and entry number — its position in the file, the same number validation errors use:
 
 | | | | | |
 | --- | --- | --- | --- | --- |
 | 🟩 Text | 🟩 List-item | 🟦 Page-header | 🟦 Page-footer | 🟪 Picture |
 | 🟧 Table | 🟥 Title | 🟦 Section-header | 🟨 Caption | 🟪 Footnote |
+| 🟩 Page-number | | | | |
 
-The overlay is **read-only and live** — it redraws from whatever is in the editor right now, so fixing a coordinate in the text immediately moves the box on the image. Entries with a missing or unusable `bbox` are skipped, so a partly-annotated file draws only the boxes it has.
+The overlay is **live** — it redraws from whatever is in the editor right now, so fixing a coordinate in the text immediately moves the box on the image. It also works the other way: you can drag a box's sides on the image (see below). Entries with a missing or unusable `bbox` are skipped, so a partly-annotated file draws only the boxes it has.
 
 Use the zoom controls (or `Ctrl` `+` / `-`) to inspect tight regions, and the reset button to fit the page back to the pane height.
+
+## Editing boxes on the image
+
+With **Show Boxes** on, you can adjust a box by dragging its sides instead of typing numbers.
+
+1. **Click inside a box** to select it. It turns solid with a handle on each side, and its coordinates appear in the **Selected Rectangle** panel. The JSON editor highlights the box's entry and scrolls just far enough to show it (an entry taller than the editor shows its `bbox` lines). Where boxes overlap, the smallest box under the pointer is selected, so a box nested inside a larger one can still be picked.
+2. **Drag a side.** Over the left or right side the cursor becomes ↔, over the top or bottom side ↕. Only the side you drag moves, and the panel shows its coordinates as you go.
+3. **Release** to write the new coordinate into the JSON editor. Only that one number changes; the other three, and the rest of the entry, stay as they were. The entry stays in view.
+4. **Save** to write the file to disk. Editing a box never saves on its own, and Save validates first as usual.
+
+It works the other way too: put the cursor anywhere in an entry in the JSON editor — by clicking, with the arrow keys, or through Find — and that entry is highlighted and its box selected, ready to drag. On a zoomed-in page the image scrolls to show the box. An entry without a usable `bbox` is highlighted with no box selected.
+
+Scrolled the editor away? Click inside the selected box again to bring its entry back. Clicking outside every box lets go of the selection and starts drawing a rectangle, as before. `Escape` also lets go. In the JSON editor, `Ctrl`+`Z` undoes a whole drag in one step.
+
+- Dragged coordinates are whole pixels. A side stops 1 px short of the opposite side and at the edge of the image — never below 1, since validation requires every coordinate to be above zero.
+- A press inside a box always selects it, so a rectangle cannot be drawn starting inside one. Hide the boxes first if you need to.
+- Editing a box rewrites the editor text in the same two-space layout files are loaded with.
 
 ## Paging through a set
 
@@ -69,7 +87,7 @@ The editor is plain text, so you can fix anything by hand. The status bar tells 
 
 ## Drawing new boxes
 
-Drag on the image to draw a rectangle. Very small drags (under a few pixels) are ignored so a stray click does not create a box. The new rectangle is selected automatically and its coordinates appear in the **Selected Rectangle** panel.
+Drag on the image to draw a rectangle — while **Show Boxes** is on, start the drag outside every box. Very small drags (under a few pixels) are ignored so a stray click does not create a box. The new rectangle is selected automatically and its coordinates appear in the **Selected Rectangle** panel.
 
 - `Delete` or `Backspace` removes the selected rectangle.
 - The **trash** button clears all drawn rectangles, after a confirmation.
@@ -83,7 +101,7 @@ Drag on the image to draw a rectangle. Very small drags (under a few pixels) are
 If problems are found, a dialog lists each one with the offending entry. Validation checks:
 
 - **Schema** — exactly the required keys for the category, no missing or extra ones (`Picture` needs `bbox` and `category`; everything else also needs `text`)
-- **Category** — must be one of the ten known categories
+- **Category** — must be one of the eleven known categories
 - **Bounding box** — all coordinates positive, with `x1 < x2` and `y1 < y2`
 
 Fix the entries the dialog names, then save again. On success the button briefly turns green and reads *Saved!*
@@ -98,7 +116,7 @@ Where the file goes depends on how it was loaded: a mounted file is **overwritte
 | `Ctrl`+`+` / `Ctrl`+`-` | Zoom the image in / out |
 | `Ctrl`+`0` | Reset image zoom |
 | `Delete` / `Backspace` | Delete the selected rectangle |
-| `Escape` | Close the About dialog |
+| `Escape` | Close a dialog, or deselect the box being edited |
 | `←` / `→` | Resize the panes (when the divider has focus) |
 | `Home` | Reset the split (when the divider has focus) |
 
@@ -112,6 +130,8 @@ Where the file goes depends on how it was loaded: a mounted file is **overwritte
 | *Save says permission was declined* | The browser's write prompt was dismissed. Save again and allow it. |
 | *"Invalid JSON format"* | The editor text is not valid JSON — check the status bar and look for a stray comma or bracket. |
 | *Boxes do not appear* | **Show Boxes** is off, or entries lack a valid `bbox`. The status bar reports how many boxes are drawn. |
+| *Dragging on the image selects a box instead of drawing* | With **Show Boxes** on, a press inside a box selects it. Start the drag outside every box, or hide the boxes. |
+| *A dragged box did not change the file* | Box edits go into the editor only. Click **Save** to write them to disk. |
 | *Some images have no annotations* | Images without a matching `.json` are skipped from the pairing; the browser console lists them. |
 
 ## Getting help
