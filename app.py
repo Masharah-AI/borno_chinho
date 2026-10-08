@@ -43,6 +43,19 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
+@app.middleware("http")
+async def no_stale_dataset_cache(request: Request, call_next):
+    # /server/* responses carry Last-Modified/ETag but had no Cache-Control,
+    # so browsers heuristically cached annotation JSON (~10% of file age) and
+    # served stale content even across refreshes — edits "disappeared" until
+    # the cache expired. no-cache forces revalidation on every use; unchanged
+    # files still come back as cheap 304s via the existing ETag.
+    response = await call_next(request)
+    if request.url.path.startswith("/server/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 templates = Jinja2Templates(directory="templates")
 
 @app.get("/", response_class=HTMLResponse)
