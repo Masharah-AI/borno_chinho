@@ -27,3 +27,6 @@ Thumbs.db
 
 
 *.sh
+
+# CodeMirror bundle build (tools/codemirror)
+node_modules/

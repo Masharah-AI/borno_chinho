@@ -74,11 +74,14 @@ class Supervisor:
             counted = "only 1 number" if len(bbox) == 1 else f"{len(bbox)} numbers"
             return [f"{shape}, but this one has {counted}."]
 
-        try:
-            coords = [int(coord) for coord in bbox]
-        except (TypeError, ValueError):
+        # Checked by type: int() would also take "12" and True, and cut 12.7
+        # down to 12. Python counts True and False as integers.
+        if any(isinstance(coord, bool) or not isinstance(coord, (int, float)) for coord in bbox):
             return [f"{shape}, but some of its values are not numbers."]
+        if any(isinstance(coord, float) for coord in bbox):
+            return [f"{shape}, but some of its values are not whole numbers."]
 
+        coords = list(bbox)
         reasons = []
 
         negative = [str(coord) for coord in coords if coord <= 0]
@@ -97,11 +100,21 @@ class Supervisor:
                 f"({x1}) is to the right of its right edge ({x2}). "
                 "The two may be swapped."
             )
+        elif x1 == x2:
+            reasons.append(
+                "Bounding box has no width: its left and right edges "
+                f"are both at {x1}."
+            )
         if y1 > y2:
             reasons.append(
                 "Bounding box is upside down: its top edge "
                 f"({y1}) is below its bottom edge ({y2}). "
                 "The two may be swapped."
+            )
+        elif y1 == y2:
+            reasons.append(
+                "Bounding box has no height: its top and bottom edges "
+                f"are both at {y1}."
             )
 
         return reasons
