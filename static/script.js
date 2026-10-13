@@ -217,8 +217,23 @@ const jsonRtlIsolate = haveCodeMirror ? CM.Decoration.mark({
     bidiIsolate: CM.Direction.RTL,
 }) : null;
 
+// CodeMirror computes bidi order one line at a time, so an isolate must not
+// cross a line break. Valid JSON keeps strings on one line, but mid-edit the
+// tree can hold a string that spans lines - a multiline paste into a value,
+// an unclosed quote - and its node would otherwise become one spanning range.
+function addIsolatePerLine(builder, doc, from, to) {
+    while (from < to) {
+        const line = doc.lineAt(from);
+        const sliceTo = Math.min(to, line.to);
+        if (from < sliceTo) builder.add(from, sliceTo, jsonRtlIsolate);
+        if (to <= line.to) break;
+        from = line.to + 1; // skip the newline
+    }
+}
+
 function findJsonStringIsolates(view) {
     const builder = new CM.RangeSetBuilder();
+    const doc = view.state.doc;
     let end = -1; // visible ranges can share a string; add it once
     view.visibleRanges.forEach(function (range) {
         CM.syntaxTree(view.state).iterate({
@@ -227,7 +242,7 @@ function findJsonStringIsolates(view) {
             enter: function (node) {
                 if (node.name !== 'String' && node.name !== 'PropertyName') return;
                 if (node.from >= end) {
-                    builder.add(node.from, node.to, jsonRtlIsolate);
+                    addIsolatePerLine(builder, doc, node.from, node.to);
                     end = node.to;
                 }
                 return false;
@@ -302,7 +317,8 @@ function findRtlStringIsolates(view) {
                 // Keys (PropertyName) are ASCII; only values can be RTL.
                 if (node.name !== 'String') return;
                 if (node.from >= end && firstStrongIsRtl(doc.sliceString(node.from, node.to))) {
-                    builder.add(node.from, node.to, jsonRtlIsolate);
+                    ensureArabicEditorFont();
+                    addIsolatePerLine(builder, doc, node.from, node.to);
                     end = node.to;
                 }
                 return false;
@@ -2541,6 +2557,10 @@ function applyJsonDirection(dir, persist) {
     if (jsonCM) jsonCM.dispatch({ effects: jsonDirection.reconfigure(rtl ? jsonRtlMode : jsonLtrPlaintext) });
     else if (jsonEditor) jsonEditor.classList.toggle('rtl', rtl);
 
+    // RTL view means Arabic (or similar) is on screen or about to be typed;
+    // have the editor's Arabic fallback font ready for it.
+    if (rtl) ensureArabicEditorFont();
+
     if (btn) {
         btn.classList.toggle('is-rtl', rtl);
         btn.setAttribute('aria-pressed', String(rtl));
@@ -2562,6 +2582,24 @@ function toggleJsonDirection() {
     const isRtl = jsonEditor && jsonEditor.classList.contains('rtl');
     applyJsonDirection(isRtl ? 'ltr' : 'rtl', true);
 }
+
+// QA helper, console-only: run __rtlDebug() in DevTools to see what the
+// editor believes about direction and isolation. `textDirection` comes from
+// CodeMirror itself (what the caret and clicks are computed from), not from
+// CSS; `visibleIsolates` counts the isolated runs in the rendered viewport.
+// See docs/RTL_TESTING.md.
+window.__rtlDebug = function () {
+    if (!jsonCM) return { codeMirror: false, note: 'textarea fallback active' };
+    const rtlMode = jsonCM.dom.classList.contains('rtl');
+    return {
+        codeMirror: true,
+        mode: rtlMode ? 'rtl' : 'ltr',
+        textDirection: jsonCM.textDirection === CM.Direction.RTL ? 'RTL' : 'LTR',
+        visibleIsolates: (rtlMode ? findJsonStringIsolates : findRtlStringIsolates)(jsonCM).size,
+        textFont: getComputedStyle(document.documentElement).getPropertyValue('--json-text-font').trim(),
+        arabicFontRequested: requestedWebFonts.has('Noto Naskh Arabic'),
+    };
+};
 
 document.addEventListener('DOMContentLoaded', function () {
     let stored = null;
@@ -2597,7 +2635,9 @@ const JSON_FONTS = [
     { id: 'noto-sans-arabic', label: 'Noto Sans Arabic', group: 'Arabic & Urdu', generic: 'sans-serif', source: 'google' },
     { id: 'amiri', label: 'Amiri', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
     { id: 'scheherazade-new', label: 'Scheherazade New', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
-    { id: 'noto-nastaliq-urdu', label: 'Noto Nastaliq Urdu', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    // Nastaliq stacks its diacritics steeply; at the editor's 1.6 line height
+    // they clip against the neighbouring lines, so it asks for more room.
+    { id: 'noto-nastaliq-urdu', label: 'Noto Nastaliq Urdu', group: 'Arabic & Urdu', generic: 'serif', source: 'google', lineHeight: '2.2' },
     // Ship with Windows and may not be redistributed, so they are never
     // fetched. Sakkal Majalla and Traditional Arabic draw small for their size,
     // so they are used enlarged.
@@ -2628,6 +2668,16 @@ function requestWebFont(family) {
     document.head.appendChild(link);
 }
 
+// Fetches the first font of the --font-arabic fallback stack (style.css) the
+// moment the editor actually shows or expects Arabic: when an RTL string is
+// found in LTR view (findRtlStringIsolates) or when RTL view is switched on.
+// Until it arrives - or without a network - the stack falls through to the
+// Arabic fonts that ship with Windows and macOS, so nothing blocks on it.
+// Hoisted; called from code above its definition.
+function ensureArabicEditorFont() {
+    requestWebFont('Noto Naskh Arabic');
+}
+
 // Whether a font is installed on this computer. Text asked for in a missing
 // font falls back to the generic family, so it measures exactly as the generic
 // alone does. Three generics are tried in case the font happens to be one of
@@ -2656,6 +2706,15 @@ function remeasureJsonEditor() {
     if (jsonCM) jsonCM.dispatch({ effects: jsonRemeasure.reconfigure(CM.EditorView.theme({})) });
 }
 
+// A web font finishing its download swaps glyphs under text already measured
+// with the fallback: line heights and widths change, but no editor update ran,
+// so clicks and the caret would keep mapping through the stale metrics.
+// applyJsonFont's own remeasure runs before the download ends, so this one,
+// after every font load, is the one that counts.
+if (typeof document !== 'undefined' && document.fonts && document.fonts.addEventListener) {
+    document.fonts.addEventListener('loadingdone', remeasureJsonEditor);
+}
+
 function applyJsonFont(id, persist) {
     let font = findJsonFont(id);
     // An unknown id, or an installed font since removed, gets the default.
@@ -2670,6 +2729,10 @@ function applyJsonFont(id, persist) {
     } else {
         root.style.removeProperty('--json-text-font');
     }
+    // Extra line room for fonts that ask for it (see lineHeight in JSON_FONTS);
+    // the .cm-text-value rule reads the property, defaulting to the editor's 1.6.
+    if (font.lineHeight) root.style.setProperty('--json-text-line-height', font.lineHeight);
+    else root.style.removeProperty('--json-text-line-height');
     remeasureJsonEditor();
 
     // The button shows the font's name; the tooltip repeats it in full for

@@ -51,6 +51,16 @@
        editor, and the validation excerpts. script.js swaps it from the
        editor's font menu. */
     --json-text-font: var(--font-mono);
+    /* Arabic-capable fallbacks, appended after the stacks above: monospace
+       fonts carry no Arabic, so without this Arabic glyphs fell to whatever
+       the browser's per-script default was. Per-glyph fallback means Latin
+       and digits never reach this list. Noto Naskh Arabic is fetched by
+       script.js the moment Arabic shows in the editor (ensureArabicEditorFont);
+       the rest cover Windows (Sakkal Majalla, Traditional Arabic, Arabic
+       Typesetting) and macOS (Geeza Pro, Al Bayan) offline. */
+    --font-arabic: 'Noto Naskh Arabic', 'Amiri', 'Scheherazade New',
+                   'Sakkal Majalla', 'Traditional Arabic', 'Arabic Typesetting',
+                   'Geeza Pro', 'Al Bayan';
 
     /* Share of the working area (window minus the tool rail) given to the
        annotation panel; the preview takes the rest. Default split is 60/40. */
@@ -748,7 +758,7 @@ body.is-resizing canvas {
     border-radius: var(--radius-md);
     padding: 14px;
     color: var(--text-primary);
-    font-family: var(--font-mono);
+    font-family: var(--font-mono), var(--font-arabic);
     /* Base size; script.js scales this inline via the JSON zoom controls. */
     font-size: 13px;
     line-height: 1.6;
@@ -775,7 +785,7 @@ body.is-resizing canvas {
    padding and font; these let the scroller fill the panel and pick up the
    theme's font, cursor and selection colours. */
 #jsonEditor .cm-scroller {
-    font-family: var(--font-mono);
+    font-family: var(--font-mono), var(--font-arabic);
     line-height: 1.6;
     overflow: auto;
 }
@@ -798,8 +808,13 @@ body.is-resizing canvas {
 #jsonEditor .tok-propertyName { color: var(--json-key); }
 
 /* The values of "text" keys - the annotation text - take the chosen text
-   font; everything else stays monospace. script.js marks those values. */
-#jsonEditor .cm-text-value { font-family: var(--json-text-font); }
+   font; everything else stays monospace. script.js marks those values.
+   The line height is raised for fonts whose diacritics overshoot the 1.6
+   default (Nastaliq); script.js sets the custom property with the font. */
+#jsonEditor .cm-text-value {
+    font-family: var(--json-text-font), var(--font-arabic);
+    line-height: var(--json-text-line-height, 1.6);
+}
 
 /* Lines of the entry whose box is selected on the image. */
 #jsonEditor .cm-selected-entry {
@@ -1406,7 +1421,7 @@ textarea#jsonEditor.rtl {
     padding-top: 6px;
     border-top: 1px dashed var(--border-color);
     /* The excerpt is entry text, so it reads in the editor's text font. */
-    font-family: var(--json-text-font);
+    font-family: var(--json-text-font), var(--font-arabic);
     font-size: 11px;
     color: var(--text-muted);
     /* One line, whatever the script or length. */
