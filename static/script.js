@@ -23,6 +23,14 @@ function createJsonEditor(textarea) {
         lineNumbers: false,
         lineWrapping: true,
         viewportMargin: Infinity,
+        // The javascript mode re-indents a line the moment a closing bracket
+        // is typed on it ("electric" characters). In this editor that made
+        // bracket edits appear to mangle the surrounding JSON: the line's
+        // leading whitespace was rewritten under the user mid-keystroke,
+        // which in bidi (Arabic) lines visually reshuffles the whole line.
+        // Brackets must insert as typed, nothing more.
+        electricChars: false,
+        smartIndent: false,
     });
 
     // fromTextArea leaves the original <textarea> in the DOM, hidden. Move the
@@ -1092,6 +1100,22 @@ function onEditorCursorActivity() {
     if (shift) jsonCM.scrollTo(null, jsonCM.getScrollInfo().top + shift);
 }
 
+// Hand edits can restructure the document: deleting or adding a bracket
+// splits, merges or renumbers entries, so a box selection held by entry
+// index may suddenly point at a DIFFERENT entry — and the next side-drag
+// would write its coordinates into that other entry's bbox. Whenever the
+// user edits the text, the selection is kept only if its entry still parses
+// to a drawable box; otherwise it is dropped on the spot. (A valid document
+// re-selects from the cursor via onEditorCursorActivity as before.)
+function revalidateBoxSelectionAfterEdit() {
+    if (jsonTextIsBeingSet || selectedBoxEntry === null) return;
+    // getJsonBoundingBoxes() is [] while the JSON is mid-edit/unparseable,
+    // which clears the selection exactly when indexes cannot be trusted.
+    if (!findJsonBox(getJsonBoundingBoxes(), selectedBoxEntry)) {
+        clearBoxSelection();
+    }
+}
+
 // Drops the selection, abandoning any drag in progress without writing it.
 // Safe to call when nothing is selected.
 function clearBoxSelection() {
@@ -1599,6 +1623,25 @@ async function writeToMountedFile(handle, content) {
     }
     return 'written';
 }
+// The dataset sits on NFS over a flaky inter-site link, so a save request can
+// hang indefinitely. Every fetch on the save path gets a hard deadline: when
+// it passes, the request is aborted and the save reports failure — the dirty
+// state is kept (the baseline is only moved on confirmed success), so nothing
+// is ever silently assumed saved.
+const SAVE_TIMEOUT_MS = 30000;
+
+function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(function () { controller.abort(); },
+                             timeoutMs || SAVE_TIMEOUT_MS);
+    const opts = Object.assign({}, options, { signal: controller.signal });
+    return fetch(url, opts).finally(function () { clearTimeout(timer); });
+}
+
+function isTimeoutError(error) {
+    return !!error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+}
+
 async function saveJSON() {
     // A second click while a save is running would race the first write.
     if (isSaving) return;
@@ -1627,7 +1670,7 @@ async function saveJSON() {
         // Ensure payload is an array when submitting to validate_json
         const payload = Array.isArray(jsonData) ? jsonData : [jsonData];
 
-        const response = await fetch('/validate_json', {
+        const response = await fetchWithTimeout('/validate_json', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -1669,7 +1712,13 @@ async function saveJSON() {
             savedShown = true;
         }
     } catch (error) {
-        showToast('error', fileName + ' was NOT saved: ' + (error.message || error));
+        // Whatever failed, the baseline was not moved, so the document stays
+        // marked dirty and the unsaved-changes indicators stay on.
+        const reason = isTimeoutError(error)
+            ? 'the server did not respond within ' + (SAVE_TIMEOUT_MS / 1000) + 's'
+            : (error.message || error);
+        showToast('error', fileName + ' was NOT saved: ' + reason
+            + ' — your edits are still here, please try saving again.', 10000);
     } finally {
         isSaving = false;
         if (!savedShown) setSaveButton('idle');
@@ -2167,8 +2216,17 @@ function applyJsonDirection(dir, persist) {
     const btn = document.getElementById('jsonDirBtn');
 
     if (jsonEditor) jsonEditor.classList.toggle('rtl', rtl);
-    // CodeMirror caches character metrics; force a re-measure after the flip.
-    if (jsonCM) jsonCM.refresh();
+    if (jsonCM) {
+        // Tell CodeMirror itself about the direction, not just the CSS: CM
+        // computes cursor placement and mouse hit-testing from the direction
+        // it believes the document has. With only the CSS flipped, clicks and
+        // typed characters (brackets especially, which bidi-mirror) landed at
+        // a different offset than where the caret appeared, corrupting text
+        // far from the visible cursor.
+        jsonCM.setOption('direction', rtl ? 'rtl' : 'ltr');
+        // CodeMirror caches character metrics; force a re-measure.
+        jsonCM.refresh();
+    }
 
     if (btn) {
         btn.classList.toggle('is-rtl', rtl);
@@ -2276,6 +2334,9 @@ document.addEventListener('DOMContentLoaded', function () {
     if (jsonEditor) {
         // Refreshes the unsaved-dot on the save button and the footer status.
         jsonEditor.addEventListener('input', updateSaveIndicators);
+        // A structural edit can renumber entries; drop a selection that no
+        // longer points at a trustworthy box BEFORE the overlay redraws.
+        jsonEditor.addEventListener('input', revalidateBoxSelectionAfterEdit);
         // Keep the overlay in step with hand edits to the JSON.
         jsonEditor.addEventListener('input', refreshBoundingBoxes);
     }
@@ -2424,8 +2485,9 @@ async function pairMountedFolders(origin) {
     imageIndex = 0;
     jsonIndex = 0;
     showPagers();
-    await showImageAt(0);
-    await showJsonAt(0);
+    // The image and the annotation live in different files; fetch them in
+    // parallel so a slow dataset link is paid once, not twice in a row.
+    await Promise.all([showImageAt(0), showJsonAt(0)]);
 
     if (unmatched.length) {
         console.warn('Images without a matching .json:', unmatched);
@@ -2497,6 +2559,21 @@ async function showImageAt(index) {
 
     currentImageFile = file.name;
     loadImage(dataUrl);
+    preloadNextImage();
+}
+
+// Warms the browser's HTTP cache with the NEXT page's image while the user
+// works on the current one. Images on the server are immutable and served
+// with Cache-Control: max-age, so this one background request makes the next
+// page switch render from cache instead of waiting on the dataset link.
+// Server-mounted folders only: local files need no warming.
+function preloadNextImage() {
+    if (!mounted) return;
+    const next = mounted.pages[imageIndex + 1];
+    if (!next || !next.image || typeof next.image.relPath !== 'string') return;
+    fetch('/server/file?path=' + encodeURIComponent(next.image.relPath))
+        .then(function (response) { return response.blob(); })
+        .catch(function () { /* best effort - the pager will fetch it again */ });
 }
 
 let jsonLoadToken = 0;
@@ -2627,6 +2704,8 @@ const SERVER_SIBLING_ROOTS = {
 function serverFileHandle(relPath, name) {
     return {
         name: name,
+        // Exposed so the pager can prefetch the next page's file by URL.
+        relPath: relPath,
 
         async getFile() {
             const response = await fetch('/server/file?path=' + encodeURIComponent(relPath));
@@ -2644,7 +2723,7 @@ function serverFileHandle(relPath, name) {
             return {
                 async write(data) { buffer = data; },
                 async close() {
-                    const response = await fetch('/server/save', {
+                    const response = await fetchWithTimeout('/server/save', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ path: relPath, text: buffer })

@@ -969,8 +969,12 @@ body.is-resizing canvas {
 /* ---------------------------------------------------------------------------
    JSON editor text direction
 
-   LTR mode is plain left-to-right: no bidi overrides, so mixed-script values
-   still shape correctly via the default Unicode Bidi Algorithm.
+   LTR mode keeps the document left-to-right, but every string VALUE is still
+   its own isolated bidi run (`unicode-bidi: plaintext` below): an Arabic
+   value lays out by its own script - natural right-to-left, matching how the
+   text appears on the page image - instead of being visually reordered by
+   the Latin key and punctuation around it. Display-only; the stored
+   characters are never touched.
 
    RTL mode turns the WHOLE editor right-to-left - structure included. Lines
    start at the right edge, and braces, commas and colons take their RTL
@@ -986,6 +990,14 @@ body.is-resizing canvas {
 #jsonEditor {
     direction: ltr;
     text-align: left;
+}
+
+/* Each quoted string lays out by its own first strong character: Arabic
+   segments read right-to-left as a sealed unit while the JSON syntax stays
+   left-to-right. Keys are ASCII, so this is a no-op on them; the dedicated
+   RTL rules below override it when RTL mode is on. */
+#jsonEditor .cm-string {
+    unicode-bidi: plaintext;
 }
 
 #jsonEditor.rtl,
