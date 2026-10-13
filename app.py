@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import base64
 import shutil
 import uvicorn
@@ -44,6 +45,12 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+# The dataset lives on NFS over a slow inter-site link, so any /server/*
+# request can stall for seconds. Log the slow ones so the link's behaviour
+# stays visible in the app log instead of surfacing only as user complaints.
+SLOW_REQUEST_THRESHOLD = 1.0  # seconds
+
+
 @app.middleware("http")
 async def no_stale_dataset_cache(request: Request, call_next):
     # /server/* responses carry Last-Modified/ETag but had no Cache-Control,
@@ -51,9 +58,26 @@ async def no_stale_dataset_cache(request: Request, call_next):
     # served stale content even across refreshes — edits "disappeared" until
     # the cache expired. no-cache forces revalidation on every use; unchanged
     # files still come back as cheap 304s via the existing ETag.
+    #
+    # Images are the one exception: dataset page scans are immutable once
+    # written, so they are safe to cache for a day. That spares a trip over
+    # the slow NFS link every time an already-seen page is revisited.
+    start = time.perf_counter()
     response = await call_next(request)
     if request.url.path.startswith("/server/"):
-        response.headers["Cache-Control"] = "no-cache"
+        target = request.query_params.get("path", "")
+        ext = os.path.splitext(target)[1].lower()
+        if request.url.path == "/server/file" and ext in IMAGE_EXTENSIONS:
+            response.headers["Cache-Control"] = "public, max-age=86400"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+
+        elapsed = time.perf_counter() - start
+        if elapsed > SLOW_REQUEST_THRESHOLD:
+            query = ("?" + request.url.query) if request.url.query else ""
+            logger.warning(
+                f"Slow request: {request.url.path}{query} took {elapsed:.2f}s"
+            )
     return response
 
 templates = Jinja2Templates(directory="templates")
@@ -121,6 +145,12 @@ async def upload_json(uploaded_file: UploadFile=File(...)):
 # so annotators can work on the shared dataset without copying it to their own
 # machine first. Every path from the client is resolved against DATA_DIR and
 # rejected if it escapes it; only .json files can be written back.
+#
+# These handlers are deliberately plain `def`, not `async def`: they do
+# blocking file I/O against NFS, and in an async handler a single stalled
+# NFS operation would freeze the whole event loop — every user, every
+# request. As sync handlers FastAPI runs them in its threadpool, so one
+# slow disk op only ties up one worker thread.
 # ---------------------------------------------------------------------------
 
 # Shadow tree holding a copy of each annotation file as it was before its
@@ -156,7 +186,7 @@ def resolve_data_path(rel_path: str):
 
 
 @app.get("/server/browse")
-async def server_browse(path: str = ""):
+def server_browse(path: str = ""):
     """The immediate subfolders of one dataset folder, plus how many image
     and annotation files sit directly in it, for the folder picker."""
 
@@ -191,7 +221,7 @@ async def server_browse(path: str = ""):
 
 
 @app.get("/server/files")
-async def server_files(path: str = "", kind: str = "images"):
+def server_files(path: str = "", kind: str = "images"):
 
     if kind not in ("images", "json"):
         raise HTTPException(status_code=400, detail="kind must be 'images' or 'json'.")
@@ -215,7 +245,7 @@ async def server_files(path: str = "", kind: str = "images"):
 
 
 @app.get("/server/file")
-async def server_file(path: str):
+def server_file(path: str):
 
     root, file_path = resolve_data_path(path)
     if not file_path.is_file():
@@ -230,7 +260,7 @@ class ServerSaveRequest(BaseModel):
 
 
 @app.post("/server/save")
-async def server_save(request: ServerSaveRequest):
+def server_save(request: ServerSaveRequest):
 
     root, file_path = resolve_data_path(request.path)
 
@@ -334,8 +364,10 @@ def describe_entry(index: int, entry: dict, problems: List[str]):
     }
 
 
+# Sync as well: validation is pure CPU work, and keeping it off the event
+# loop means a long file cannot delay unrelated requests.
 @app.post("/validate_json")
-async def validate_json(data: List[dict]):
+def validate_json(data: List[dict]):
 
     supervisor = Supervisor()
 
@@ -395,7 +427,7 @@ async def validate_json(data: List[dict]):
 
 
 @app.post("/validate_json_dev")
-async def validate_json_dev(data: List[dict]):
+def validate_json_dev(data: List[dict]):
 
     supervisor = Supervisor()
     for entry in data:
