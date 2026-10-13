@@ -1,54 +1,145 @@
 // ---------------------------------------------------------------------------
 // JSON editor
-// Backed by CodeMirror so RTL mode can isolate each string VALUE as its own
-// bidi run (see applyJsonDirection). The rest of the app predates that change
-// and talks to the editor as if it were the original <textarea>, so this
-// returns a shim exposing the same surface: .value, .setSelectionRange(),
-// .focus(), .style.fontSize and addEventListener('input', ...).
+// Backed by CodeMirror 6 so RTL mode can lay each string out as its own
+// isolated right-to-left run and still have clicks, the caret and selections
+// land on the text as drawn (see jsonRtlMode). The rest of the app predates
+// CodeMirror and talks to the editor as if it were the original <textarea>,
+// so this returns a shim exposing the same surface: .value, .load(),
+// .setSelectionRange(), .selectionStart/.selectionEnd, .focus(),
+// .style.fontSize, .classList and addEventListener('input' | 'cursoractivity', ...).
 //
 // If CodeMirror fails to load the shim degrades to the real <textarea>, which
-// keeps the app fully usable minus the per-value RTL isolation.
+// keeps the app fully usable minus the RTL isolation, the cursor -> box
+// selection and the text font (which needs the "text" values marked).
 // ---------------------------------------------------------------------------
-let jsonCM = null;
+let jsonCM = null; // the EditorView
 // True while the app itself replaces the editor text (loading a file, writing
 // a dragged box side). The cursor moves then too, but it is not the user
-// moving it, so the cursor -> box selection ignores it.
+// moving it, so 'cursoractivity' is not reported for it.
 let jsonTextIsBeingSet = false;
 
+// False when the CodeMirror bundle failed to load (see the fallback above).
+const haveCodeMirror = typeof CM !== 'undefined';
+
+// Holds jsonRtlMode while RTL view is on, nothing otherwise.
+const jsonDirection = haveCodeMirror ? new CM.Compartment() : null;
+
+// Holds an empty theme, swapped for a fresh one to make CodeMirror re-measure
+// after the text font changes; see remeasureJsonEditor.
+const jsonRemeasure = haveCodeMirror ? new CM.Compartment() : null;
+
+// Lines of the entry whose box is selected; see highlightJsonEntry.
+const setEntryHighlight = haveCodeMirror ? CM.StateEffect.define() : null;
+
 function createJsonEditor(textarea) {
-    if (!textarea || typeof CodeMirror === 'undefined') return textarea;
+    if (!textarea || !haveCodeMirror) return textarea;
 
-    jsonCM = CodeMirror.fromTextArea(textarea, {
-        mode: { name: 'javascript', json: true },
-        lineNumbers: false,
-        lineWrapping: true,
-        viewportMargin: Infinity,
-    });
+    const inputHandlers = [];
+    const cursorHandlers = [];
+    let cursorReportPending = false;
 
-    // fromTextArea leaves the original <textarea> in the DOM, hidden. Move the
-    // id onto the wrapper so #jsonEditor styling and getElementById reach the
-    // visible editor - two elements sharing an id would silently resolve to the
-    // hidden textarea and every style/class toggle would go nowhere.
-    const wrapper = jsonCM.getWrapperElement();
-    textarea.removeAttribute('id');
-    wrapper.id = 'jsonEditor';
+    // Reported after the update that moved the cursor has finished: the
+    // handlers highlight lines and scroll, and CodeMirror refuses changes
+    // made from inside one of its own updates.
+    function reportCursorActivity() {
+        if (cursorReportPending) return;
+        cursorReportPending = true;
+        queueMicrotask(function () {
+            cursorReportPending = false;
+            cursorHandlers.forEach(function (handler) { handler(); });
+        });
+    }
+
+    function createState(text, direction) {
+        return CM.EditorState.create({
+            doc: text,
+            extensions: [
+                CM.json(),
+                CM.syntaxHighlighting(CM.classHighlighter),
+                CM.history(),
+                CM.drawSelection(),
+                CM.highlightSpecialChars(),
+                CM.EditorView.lineWrapping,
+                CM.placeholder(textarea.placeholder || ''),
+                CM.keymap.of([
+                    // Tab inserts a tab, or indents a selection, rather than
+                    // moving focus out of the editor.
+                    { key: 'Tab', run: CM.insertTab, shift: CM.indentLess },
+                    ...CM.historyKeymap,
+                    ...CM.defaultKeymap,
+                ]),
+                entryHighlightField,
+                jsonTextValues,
+                jsonDirection.of(direction),
+                jsonRemeasure.of([]),
+                CM.EditorView.updateListener.of(function (update) {
+                    if (update.docChanged) {
+                        inputHandlers.forEach(function (handler) { handler(); });
+                    }
+                    if ((update.docChanged || update.selectionSet) && !jsonTextIsBeingSet) {
+                        reportCursorActivity();
+                    }
+                }),
+            ],
+        });
+    }
+
+    jsonCM = new CM.EditorView({ state: createState(textarea.value, []) });
+    textarea.replaceWith(jsonCM.dom);
+    // The id moves onto the editor so #jsonEditor styling and getElementById
+    // reach the visible element.
+    jsonCM.dom.id = 'jsonEditor';
+    const wrapper = jsonCM.dom;
 
     return {
         cm: jsonCM,
         el: wrapper,
 
-        get value() { return jsonCM.getValue(); },
+        get value() { return jsonCM.state.doc.toString(); },
+        // Programmatic edits (find & replace, a dragged box side). Only the
+        // span that actually differs is replaced, so the cursor, the scroll
+        // position and the entry highlight stay where they are, and the edit
+        // is a single undo step of its own.
         set value(v) {
-            // Preserve the cursor so programmatic refreshes (updateJSON on every
-            // box edit) don't yank the caret to the top while the user types.
-            const cursor = jsonCM.getCursor();
+            const text = v == null ? '' : String(v);
+            const old = jsonCM.state.doc.toString();
+            if (text === old) return;
+
+            let start = 0;
+            const shorter = Math.min(old.length, text.length);
+            while (start < shorter && old[start] === text[start]) start++;
+            let oldEnd = old.length;
+            let newEnd = text.length;
+            while (oldEnd > start && newEnd > start && old[oldEnd - 1] === text[newEnd - 1]) {
+                oldEnd--;
+                newEnd--;
+            }
+
             jsonTextIsBeingSet = true;
             try {
-                jsonCM.setValue(v == null ? '' : String(v));
-                jsonCM.setCursor(cursor);
+                jsonCM.dispatch({
+                    changes: { from: start, to: oldEnd, insert: text.slice(start, newEnd) },
+                    annotations: CM.isolateHistory.of('full'),
+                });
             } finally {
                 jsonTextIsBeingSet = false;
             }
+        },
+
+        // Shows a newly opened file: fresh undo history, cursor and scroll at
+        // the top, so Ctrl+Z cannot step back into the previous file.
+        load(text) {
+            jsonTextIsBeingSet = true;
+            try {
+                jsonCM.setState(createState(text == null ? '' : String(text), jsonDirection.get(jsonCM.state)));
+                // setState keeps the old scroll offset, which in a shorter
+                // file lands at its end.
+                jsonCM.dispatch({ effects: CM.EditorView.scrollIntoView(0, { y: 'start' }) });
+            } finally {
+                jsonTextIsBeingSet = false;
+            }
+            // setState is not an update, so tell the listeners here.
+            inputHandlers.forEach(function (handler) { handler(); });
         },
 
         get classList() { return wrapper.classList; },
@@ -56,17 +147,169 @@ function createJsonEditor(textarea) {
 
         focus() { jsonCM.focus(); },
 
-        // Character offsets in / line-ch out, so find-and-replace keeps working.
         setSelectionRange(start, end) {
-            jsonCM.setSelection(jsonCM.posFromIndex(start), jsonCM.posFromIndex(end));
+            jsonCM.dispatch({ selection: { anchor: start, head: end }, scrollIntoView: true });
         },
 
+        get selectionStart() { return jsonCM.state.selection.main.from; },
+        get selectionEnd() { return jsonCM.state.selection.main.to; },
+
         addEventListener(type, handler) {
-            if (type === 'input') jsonCM.on('change', handler);
+            if (type === 'input') inputHandlers.push(handler);
+            else if (type === 'cursoractivity') cursorHandlers.push(handler);
             else wrapper.addEventListener(type, handler);
         },
     };
 }
+
+// Shows a newly opened file in the editor. Unlike assigning .value, this
+// starts a fresh undo history.
+function loadJsonText(text) {
+    if (typeof jsonEditor.load === 'function') {
+        jsonEditor.load(text);
+    } else {
+        // The textarea fallback fires no 'input' for a scripted change.
+        jsonEditor.value = text;
+        jsonEditor.dispatchEvent(new Event('input'));
+    }
+}
+
+// The highlighted entry's lines, as line decorations. They follow edits on
+// their own; highlightJsonEntry replaces them as the selection changes.
+const entryLineMark = haveCodeMirror ? CM.Decoration.line({ class: 'cm-selected-entry' }) : null;
+
+const entryHighlightField = haveCodeMirror ? CM.StateField.define({
+    create() { return CM.Decoration.none; },
+    update(lines, tr) {
+        lines = lines.map(tr.changes);
+        tr.effects.forEach(function (effect) {
+            if (!effect.is(setEntryHighlight)) return;
+            if (!effect.value) {
+                lines = CM.Decoration.none;
+                return;
+            }
+            const doc = tr.state.doc;
+            const builder = new CM.RangeSetBuilder();
+            const last = doc.lineAt(effect.value.to).number;
+            for (let n = doc.lineAt(effect.value.from).number; n <= last; n++) {
+                const from = doc.line(n).from;
+                builder.add(from, from, entryLineMark);
+            }
+            lines = builder.finish();
+        });
+        return lines;
+    },
+    provide: function (field) { return CM.EditorView.decorations.from(field); },
+}) : null;
+
+// RTL view. The whole editor runs right to left, and every quoted string -
+// keys and values - is its own isolated RTL run. Isolation is what keeps the
+// neutral characters at a value's edges ((*), brackets, ':') with the Arabic
+// they belong to, instead of drifting towards the Latin key beside them.
+// Registering the isolates with CodeMirror (bidiIsolatedRanges) is what makes
+// clicks, the caret and selections follow that layout; CodeMirror 5 had no
+// notion of isolates, so English text in RTL view could not be clicked into.
+const jsonRtlIsolate = haveCodeMirror ? CM.Decoration.mark({
+    attributes: { dir: 'rtl', style: 'unicode-bidi: isolate' },
+    bidiIsolate: CM.Direction.RTL,
+}) : null;
+
+function findJsonStringIsolates(view) {
+    const builder = new CM.RangeSetBuilder();
+    let end = -1; // visible ranges can share a string; add it once
+    view.visibleRanges.forEach(function (range) {
+        CM.syntaxTree(view.state).iterate({
+            from: range.from,
+            to: range.to,
+            enter: function (node) {
+                if (node.name !== 'String' && node.name !== 'PropertyName') return;
+                if (node.from >= end) {
+                    builder.add(node.from, node.to, jsonRtlIsolate);
+                    end = node.to;
+                }
+                return false;
+            },
+        });
+    });
+    return builder.finish();
+}
+
+const jsonRtlMode = haveCodeMirror ? [
+    // On the root, not just the content, so the scroller is right to left too
+    // and puts its scrollbar on the left. CodeMirror assumes it is there when
+    // the text runs right to left; with the scrollbar on the right, the caret
+    // and selections were drawn a scrollbar's width left of the text.
+    // CodeMirror rewrites its root element's class list on every update, so
+    // the `rtl` marker has to come through it to stick.
+    CM.EditorView.editorAttributes.of({ class: 'rtl', dir: 'rtl' }),
+    CM.ViewPlugin.fromClass(class {
+        constructor(view) {
+            this.isolates = findJsonStringIsolates(view);
+            this.tree = CM.syntaxTree(view.state);
+        }
+        update(update) {
+            const tree = CM.syntaxTree(update.state);
+            if (update.docChanged || update.viewportChanged || tree !== this.tree) {
+                this.isolates = findJsonStringIsolates(update.view);
+                this.tree = tree;
+            }
+        }
+    }, {
+        provide: function (plugin) {
+            function isolates(view) {
+                const value = view.plugin(plugin);
+                return value ? value.isolates : CM.Decoration.none;
+            }
+            // Outer decorations wrap the syntax colouring, so nothing splits
+            // a string's isolate into pieces.
+            return [CM.EditorView.outerDecorations.of(isolates), CM.EditorView.bidiIsolatedRanges.of(isolates)];
+        },
+    }),
+] : null;
+
+// The value of every "text" key - the annotation text - is marked so the text
+// font can style it alone (see "JSON editor text font"). Other strings, such
+// as a category, stay in the editor's monospace.
+const jsonTextValueMark = haveCodeMirror ? CM.Decoration.mark({ class: 'cm-text-value' }) : null;
+
+function findJsonTextValues(view) {
+    const builder = new CM.RangeSetBuilder();
+    const doc = view.state.doc;
+    let end = -1; // visible ranges can share a property; add it once
+    view.visibleRanges.forEach(function (range) {
+        CM.syntaxTree(view.state).iterate({
+            from: range.from,
+            to: range.to,
+            enter: function (node) {
+                if (node.name !== 'Property') return;
+                const key = node.node.getChild('PropertyName');
+                const value = node.node.lastChild;
+                if (key && value && value.name === 'String' && value.from >= end
+                        && doc.sliceString(key.from, key.to) === '"text"') {
+                    builder.add(value.from, value.to, jsonTextValueMark);
+                    end = value.to;
+                }
+            },
+        });
+    });
+    return builder.finish();
+}
+
+const jsonTextValues = haveCodeMirror ? CM.ViewPlugin.fromClass(class {
+    constructor(view) {
+        this.decorations = findJsonTextValues(view);
+        this.tree = CM.syntaxTree(view.state);
+    }
+    update(update) {
+        const tree = CM.syntaxTree(update.state);
+        if (update.docChanged || update.viewportChanged || tree !== this.tree) {
+            this.decorations = findJsonTextValues(update.view);
+            this.tree = tree;
+        }
+    }
+}, {
+    decorations: function (plugin) { return plugin.decorations; },
+}) : null;
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -89,6 +332,10 @@ let currentJsonFile = null;
 // in place. Null when the browser lacks the File System Access API and the
 // hidden file input was used instead.
 let loadedJsonHandle = null;
+// True while the editor shows a page of the mounted annotation folder, false
+// once Load replaces it with a file of its own, so Save writes back to the
+// file actually showing rather than to the page the pager is on.
+let jsonFromMountedPage = false;
 let selectedAnnotation = null;
 let currentCategory = 'text';
 // JSON editor zoom state
@@ -169,9 +416,10 @@ async function displayJSONFile(file) {
 
     const data = await response.json();
     currentJsonFile = data.name || file.name;
+    jsonFromMountedPage = false;
     // A selection points into the old file's entries.
     clearBoxSelection();
-    jsonEditor.value = JSON.stringify(data.content, null, 2);
+    loadJsonText(JSON.stringify(data.content, null, 2));
     refreshBoundingBoxes();
     return true;
 }
@@ -956,21 +1204,12 @@ function selectJsonBox(entryIndex, fromEditor) {
     else revealJsonEntry(entryIndex);
 }
 
-// Lines of the editor highlighted as the selected box's entry.
-let entryHighlightLines = [];
-
 // Breathing room, in pixels, kept around an entry scrolled into view.
 const ENTRY_REVEAL_MARGIN = 24;
 
 function clearEntryHighlight() {
     if (!jsonCM) return;
-    entryHighlightLines.forEach(function (handle) {
-        // Lines replaced since (every box edit rewrites the text) are gone.
-        if (jsonCM.getLineNumber(handle) !== null) {
-            jsonCM.removeLineClass(handle, 'background', 'cm-selected-entry');
-        }
-    });
-    entryHighlightLines = [];
+    jsonCM.dispatch({ effects: setEntryHighlight.of(null) });
 }
 
 // Highlights an entry's lines in the editor, replacing any earlier highlight.
@@ -980,7 +1219,7 @@ function highlightJsonEntry(entryIndex) {
     if (!jsonCM) return null;
     clearEntryHighlight();
 
-    const text = jsonCM.getValue();
+    const text = jsonCM.state.doc.toString();
     let parsed;
     try {
         parsed = JSON.parse(text);
@@ -992,12 +1231,9 @@ function highlightJsonEntry(entryIndex) {
     const range = locateJsonValue(text, path);
     if (!range) return null;
 
-    const from = jsonCM.posFromIndex(range.start);
-    const to = jsonCM.posFromIndex(range.end);
-    for (let line = from.line; line <= to.line; line++) {
-        entryHighlightLines.push(jsonCM.addLineClass(line, 'background', 'cm-selected-entry'));
-    }
-    return { text: text, path: path, from: from, to: to };
+    const entry = { text: text, path: path, from: range.start, to: range.end };
+    jsonCM.dispatch({ effects: setEntryHighlight.of(entry) });
+    return entry;
 }
 
 // Highlights an entry and scrolls the editor the least distance that brings
@@ -1009,15 +1245,17 @@ function revealJsonEntry(entryIndex) {
     if (!entry) return;
 
     let target = { from: entry.from, to: entry.to };
-    const height = jsonCM.charCoords(entry.to, 'local').bottom
-        - jsonCM.charCoords(entry.from, 'local').top;
-    if (height > jsonCM.getScrollInfo().clientHeight - 2 * ENTRY_REVEAL_MARGIN) {
+    const height = jsonCM.lineBlockAt(entry.to).bottom - jsonCM.lineBlockAt(entry.from).top;
+    if (height > jsonCM.scrollDOM.clientHeight - 2 * ENTRY_REVEAL_MARGIN) {
         const bbox = locateJsonValue(entry.text, entry.path.concat('bbox'));
-        if (bbox) {
-            target = { from: jsonCM.posFromIndex(bbox.start), to: jsonCM.posFromIndex(bbox.end) };
-        }
+        if (bbox) target = { from: bbox.start, to: bbox.end };
     }
-    jsonCM.scrollIntoView(target, ENTRY_REVEAL_MARGIN);
+    jsonCM.dispatch({
+        effects: CM.EditorView.scrollIntoView(CM.EditorSelection.range(target.from, target.to), {
+            y: 'nearest',
+            yMargin: ENTRY_REVEAL_MARGIN,
+        }),
+    });
 }
 
 // Scrolls the image the least distance that shows `box`, so a box selected
@@ -1048,18 +1286,23 @@ function revealBoxOnCanvas(box) {
 // The editor -> image direction. With the boxes showing, putting the cursor
 // in an entry (click, arrow keys, find) highlights it and selects its box; an
 // entry without a usable bbox is highlighted with no box selected. Text the
-// app rewrites itself is not the user's cursor and is skipped (see
-// jsonTextIsBeingSet).
+// app rewrites itself is not the user's cursor and is never reported here
+// (see jsonTextIsBeingSet).
 function onEditorCursorActivity() {
-    if (jsonTextIsBeingSet || !showBoundingBoxes || bboxDrag) return;
+    if (!showBoundingBoxes || bboxDrag) return;
 
-    const entryIndex = findEntryAt(jsonCM.getValue(), jsonCM.indexFromPos(jsonCM.getCursor()));
+    const head = jsonCM.state.selection.main.head;
+    const entryIndex = findEntryAt(jsonCM.state.doc.toString(), head);
     if (entryIndex === null) return; // e.g. on the opening "[" line
 
     // Selecting can show or hide the coordinates panel above the editor, which
     // resizes the editor from the top and would shift the text under the
     // user's pointer. Note where the cursor's line sits so it can stay put.
-    const anchor = jsonCM.cursorCoords(null, 'window').top;
+    const cursorTop = function () {
+        const coords = jsonCM.coordsAtPos(head);
+        return coords ? coords.top : null;
+    };
+    const anchor = cursorTop();
 
     const box = findJsonBox(getJsonBoundingBoxes(), entryIndex);
     if (!box) {
@@ -1073,8 +1316,10 @@ function onEditorCursorActivity() {
         highlightJsonEntry(entryIndex);
     }
 
-    const shift = jsonCM.cursorCoords(null, 'window').top - anchor;
-    if (shift) jsonCM.scrollTo(null, jsonCM.getScrollInfo().top + shift);
+    const after = cursorTop();
+    if (anchor !== null && after !== null && after !== anchor) {
+        jsonCM.scrollDOM.scrollTop += after - anchor;
+    }
 }
 
 // Drops the selection, abandoning any drag in progress without writing it.
@@ -1415,10 +1660,9 @@ function triggerSaveDialog() {
 }
 
 // The handle for the JSON file currently shown in the editor, or null when it
-// arrived through the plain file input (which yields no handle). A mounted
-// folder wins, since the pager is then what drives the editor's contents.
+// arrived through the plain file input (which yields no handle).
 function currentJsonHandle() {
-    if (mounted) {
+    if (mounted && jsonFromMountedPage) {
         const page = mounted.pages[jsonIndex];
         if (page && page.annotation) return page.annotation;
     }
@@ -1455,6 +1699,11 @@ async function writeToMountedFile() {
     }
     return 'written';
 }
+
+// The "Saved!" confirmation: its pending reset, and the button it replaced.
+let saveFeedbackTimer = null;
+let saveBtnIdleHTML = '';
+
 async function saveJSON() {
     let jsonData;
     try {
@@ -1492,13 +1741,18 @@ async function saveJSON() {
             // show quick saved feedback
             const saveBtn = document.getElementById('saveJsonBtn');
             if (saveBtn) {
-                const originalHTML = saveBtn.innerHTML;
-                saveBtn.innerHTML = '<i data-lucide="check"></i> Saved!';
+                // A save during the feedback restarts it; the button's own
+                // contents are only captured while it is not showing "Saved!".
+                if (saveFeedbackTimer === null) saveBtnIdleHTML = saveBtn.innerHTML;
+                else clearTimeout(saveFeedbackTimer);
+                // Wrapped like the label it replaces, which a crowded header hides.
+                saveBtn.innerHTML = '<i data-lucide="check"></i> <span class="small-btn-label">Saved!</span>';
                 saveBtn.style.background = 'var(--success-solid)';
                 saveBtn.style.color = '#ffffff';
                 if (typeof lucide !== 'undefined') lucide.createIcons();
-                setTimeout(() => {
-                    saveBtn.innerHTML = originalHTML;
+                saveFeedbackTimer = setTimeout(() => {
+                    saveFeedbackTimer = null;
+                    saveBtn.innerHTML = saveBtnIdleHTML;
                     saveBtn.style.background = '';
                     saveBtn.style.color = '';
                     if (typeof lucide !== 'undefined') lucide.createIcons();
@@ -1681,7 +1935,7 @@ document.addEventListener('keydown', function(e) {
 
 // Initialize on page load
 window.addEventListener('load', function() {
-    jsonEditor.value = '';
+    loadJsonText('');
     // initialize JSON editor font-size based on zoom
     if (jsonEditor) {
         jsonEditor.style.fontSize = `${baseJsonFontSize * jsonZoomLevel}px`;
@@ -1696,8 +1950,8 @@ function updateJsonZoomDisplay() {
     const zEl = document.getElementById('jsonZoomLevel');
     if (zEl) zEl.textContent = `${Math.round(jsonZoomLevel * 100)}%`;
     if (jsonEditor) jsonEditor.style.fontSize = `${baseJsonFontSize * jsonZoomLevel}px`;
-    // CodeMirror measures character width once; re-measure after a size change.
-    if (jsonCM) jsonCM.refresh();
+    // Line heights and character widths change with the font size.
+    if (jsonCM) jsonCM.requestMeasure();
 }
 
 function zoomJsonIn() {
@@ -1746,64 +2000,79 @@ function updateFindCounter() {
     }
     
     const matches = findMatches(findInput);
-    counter.textContent = matches.length > 0 ? `${findIndex + 1} of ${matches.length}` : 'No matches';
+    counter.textContent = matches.length > 0
+        ? `${Math.min(findIndex, matches.length - 1) + 1} of ${matches.length}`
+        : 'No matches';
 }
 
+// Selects match `index` and shows its number in the counter.
+function selectMatch(matches, index, length) {
+    findIndex = index;
+    jsonEditor.setSelectionRange(matches[index], matches[index] + length);
+    jsonEditor.focus();
+    updateFindCounter();
+}
+
+// Next and Previous move on from the editor's selection rather than from a
+// remembered position, so they start where the cursor is and stay right when
+// the text changes under the bar (an edit, a replace, another page).
 function findNext() {
     const findInput = document.getElementById('findInput').value;
     if (!findInput) return;
-    
+
     const matches = findMatches(findInput);
     if (matches.length === 0) return;
-    
-    findIndex = (findIndex + 1) % matches.length;
-    const start = matches[findIndex];
-    
-    jsonEditor.setSelectionRange(start, start + findInput.length);
-    jsonEditor.focus();
-    updateFindCounter();
+
+    const from = jsonEditor.selectionEnd;
+    const index = matches.findIndex(function (start) { return start >= from; });
+    selectMatch(matches, index < 0 ? 0 : index, findInput.length);
 }
 
 function findPrev() {
     const findInput = document.getElementById('findInput').value;
     if (!findInput) return;
-    
+
     const matches = findMatches(findInput);
     if (matches.length === 0) return;
-    
-    findIndex = (findIndex - 1 + matches.length) % matches.length;
-    const start = matches[findIndex];
-    
-    jsonEditor.setSelectionRange(start, start + findInput.length);
-    jsonEditor.focus();
-    updateFindCounter();
+
+    const to = jsonEditor.selectionStart;
+    let index = matches.length - 1;
+    while (index >= 0 && matches[index] >= to) index--;
+    selectMatch(matches, index < 0 ? matches.length - 1 : index, findInput.length);
 }
 
+// Replaces the match the selection covers and moves on to the next. With no
+// match selected it only finds the next one, so nothing is replaced unseen.
 function replaceOne() {
     const findInput = document.getElementById('findInput').value;
     const replaceInput = document.getElementById('replaceInput').value;
-    
+
     if (!findInput) return;
-    
-    const matches = findMatches(findInput);
-    if (matches.length === 0) return;
-    
-    const start = matches[findIndex];
-    const before = jsonEditor.value.substring(0, start);
-    const after = jsonEditor.value.substring(start + findInput.length);
-    
-    jsonEditor.value = before + replaceInput + after;
-    updateFindCounter();
-    findNext();
+
+    const text = jsonEditor.value;
+    const start = jsonEditor.selectionStart;
+    if (jsonEditor.selectionEnd !== start + findInput.length
+            || text.slice(start, start + findInput.length) !== findInput) {
+        findNext();
+        return;
+    }
+
+    jsonEditor.value = text.slice(0, start) + replaceInput + text.slice(start + findInput.length);
+    const after = start + replaceInput.length;
+    jsonEditor.setSelectionRange(after, after);
+    if (findMatches(findInput).length > 0) findNext();
+    else updateFindCounter();
 }
 
 function replaceAll() {
     const findInput = document.getElementById('findInput').value;
     const replaceInput = document.getElementById('replaceInput').value;
-    
+
     if (!findInput) return;
-    
-    jsonEditor.value = jsonEditor.value.replaceAll(findInput, replaceInput);
+
+    // split/join rather than replaceAll(), which reads "$&" or "$1" in the
+    // replacement as a pattern instead of text to insert.
+    jsonEditor.value = jsonEditor.value.split(findInput).join(replaceInput);
     findIndex = 0;
     updateFindCounter();
 }
@@ -1988,20 +2257,16 @@ document.addEventListener('keydown', function (e) {
 
 // ---------------------------------------------------------------------------
 // JSON editor text direction (LTR / RTL)
-// RTL mode keeps the JSON structure (keys, braces, commas) reading left to
-// right and flips only the quoted string VALUES, each of which becomes its own
-// isolated RTL run. Isolation is what makes leading markers like "(*)" sit on
-// the right: without it the Latin key to the left of the string pulls those
-// neutral characters back to the LTR side. See the .cm-string rules in
-// style.css - the work is done there; this only toggles the class.
+// RTL mode turns the whole editor right to left and makes every quoted string
+// its own isolated RTL run - see jsonRtlMode for why, and for how CodeMirror
+// is told about it. The editor's `rtl` class records the mode.
 // ---------------------------------------------------------------------------
 function applyJsonDirection(dir, persist) {
     const rtl = dir === 'rtl';
     const btn = document.getElementById('jsonDirBtn');
 
-    if (jsonEditor) jsonEditor.classList.toggle('rtl', rtl);
-    // CodeMirror caches character metrics; force a re-measure after the flip.
-    if (jsonCM) jsonCM.refresh();
+    if (jsonCM) jsonCM.dispatch({ effects: jsonDirection.reconfigure(rtl ? jsonRtlMode : []) });
+    else if (jsonEditor) jsonEditor.classList.toggle('rtl', rtl);
 
     if (btn) {
         btn.classList.toggle('is-rtl', rtl);
@@ -2033,6 +2298,286 @@ document.addEventListener('DOMContentLoaded', function () {
         // ignore - fall back to LTR
     }
     applyJsonDirection(stored === 'rtl' ? 'rtl' : 'ltr', false);
+});
+
+// ---------------------------------------------------------------------------
+// JSON editor text font
+// The values of "text" keys hold the annotation text, so they can be shown in
+// a font made for their script while everything else stays monospace. The
+// choice is the --json-text-font custom property, which the .cm-text-value
+// rule in style.css reads (jsonTextValues marks those values). Google fonts
+// are only requested once picked, so the
+// default costs no download. An installed font cannot be fetched, so it is
+// offered only on computers that have it.
+// ---------------------------------------------------------------------------
+
+// `label` doubles as the font family name; `generic` is the fallback while a
+// web font downloads or when it cannot be reached. `alias` names an
+// @font-face in style.css that resizes the font, tried before the font itself.
+const JSON_FONTS = [
+    { id: 'mono', label: 'Monospace', group: 'Default' },
+    { id: 'noto-sans-bengali', label: 'Noto Sans Bengali', group: 'Bengali', generic: 'sans-serif', source: 'google' },
+    { id: 'noto-serif-bengali', label: 'Noto Serif Bengali', group: 'Bengali', generic: 'serif', source: 'google' },
+    { id: 'hind-siliguri', label: 'Hind Siliguri', group: 'Bengali', generic: 'sans-serif', source: 'google' },
+    { id: 'tiro-bangla', label: 'Tiro Bangla', group: 'Bengali', generic: 'serif', source: 'google' },
+    { id: 'noto-naskh-arabic', label: 'Noto Naskh Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    { id: 'noto-sans-arabic', label: 'Noto Sans Arabic', group: 'Arabic & Urdu', generic: 'sans-serif', source: 'google' },
+    { id: 'amiri', label: 'Amiri', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    { id: 'scheherazade-new', label: 'Scheherazade New', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    { id: 'noto-nastaliq-urdu', label: 'Noto Nastaliq Urdu', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    // Ship with Windows and may not be redistributed, so they are never
+    // fetched. Sakkal Majalla and Traditional Arabic draw small for their size,
+    // so they are used enlarged.
+    { id: 'sakkal-majalla', label: 'Sakkal Majalla', group: 'Arabic & Urdu', generic: 'serif', source: 'installed', alias: 'Sakkal Majalla Enlarged' },
+    { id: 'simplified-arabic', label: 'Simplified Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'installed' },
+    { id: 'traditional-arabic', label: 'Traditional Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'installed', alias: 'Traditional Arabic Enlarged' },
+    // The King Fahd Complex's Uthmanic Hafs font (version 2 and later; earlier
+    // versions call it "KFGQPC Uthmanic Script HAFS"). Not on Google Fonts.
+    { id: 'kfgqpc-hafs', label: 'KFGQPC HAFS Uthmanic Script', group: 'Arabic & Urdu', generic: 'serif', source: 'installed' },
+];
+const DEFAULT_JSON_FONT = 'mono';
+
+function findJsonFont(id) {
+    return JSON_FONTS.find(function (font) { return font.id === id; }) || null;
+}
+
+// Families whose Google Fonts stylesheet has already been added.
+const requestedWebFonts = new Set();
+
+function requestWebFont(family) {
+    if (requestedWebFonts.has(family)) return;
+    requestedWebFonts.add(family);
+
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family='
+        + family.replace(/ /g, '+') + '&display=swap';
+    document.head.appendChild(link);
+}
+
+// Whether a font is installed on this computer. Text asked for in a missing
+// font falls back to the generic family, so it measures exactly as the generic
+// alone does. Three generics are tried in case the font happens to be one of
+// them.
+const fontProbe = document.createElement('canvas').getContext('2d');
+
+function isFontInstalled(family) {
+    const sample = 'مجلة العربية abc 123';
+    return ['monospace', 'serif', 'sans-serif'].some(function (generic) {
+        fontProbe.font = '32px ' + generic;
+        const fallbackWidth = fontProbe.measureText(sample).width;
+        fontProbe.font = '32px "' + family + '", ' + generic;
+        return fontProbe.measureText(sample).width !== fallbackWidth;
+    });
+}
+
+function isJsonFontAvailable(font) {
+    return font.source !== 'installed' || isFontInstalled(font.label);
+}
+
+// The font is set on tokens inside the lines, a change CodeMirror does not
+// notice: it keeps the old line heights and maps clicks onto the wrong line.
+// requestMeasure() is not enough, but a theme change makes it measure the
+// content again, and a fresh empty theme changes nothing else.
+function remeasureJsonEditor() {
+    if (jsonCM) jsonCM.dispatch({ effects: jsonRemeasure.reconfigure(CM.EditorView.theme({})) });
+}
+
+function applyJsonFont(id, persist) {
+    let font = findJsonFont(id);
+    // An unknown id, or an installed font since removed, gets the default.
+    if (!font || !isJsonFontAvailable(font)) font = findJsonFont(DEFAULT_JSON_FONT);
+
+    const root = document.documentElement;
+    if (font.source) {
+        if (font.source === 'google') requestWebFont(font.label);
+        const families = font.alias ? [font.alias, font.label] : [font.label];
+        root.style.setProperty('--json-text-font',
+            families.map(function (family) { return '"' + family + '"'; }).join(', ') + ', ' + font.generic);
+    } else {
+        root.style.removeProperty('--json-text-font');
+    }
+    remeasureJsonEditor();
+
+    // The button shows the font's name; the tooltip repeats it in full for
+    // when a narrow pane cuts the name short.
+    const btn = document.getElementById('jsonFontBtn');
+    const label = document.getElementById('jsonFontLabel');
+    if (label) label.textContent = font.label;
+    if (btn) {
+        btn.title = 'Text font: ' + font.label;
+        btn.setAttribute('aria-label', 'Text font: ' + font.label);
+    }
+    document.querySelectorAll('#jsonFontMenu .font-menu-item').forEach(function (item) {
+        item.setAttribute('aria-checked', String(item.dataset.font === font.id));
+    });
+
+    if (persist) {
+        try {
+            localStorage.setItem('jsonFont', font.id);
+        } catch (e) {
+            // localStorage unavailable - the font still applies this session
+        }
+    }
+}
+
+function buildJsonFontMenu() {
+    const menu = document.getElementById('jsonFontMenu');
+    if (!menu) return;
+
+    let group = null;
+    let groupName = null;
+    JSON_FONTS.forEach(function (font) {
+        if (font.group !== groupName) {
+            groupName = font.group;
+            group = document.createElement('div');
+            group.setAttribute('role', 'group');
+            group.setAttribute('aria-label', groupName);
+
+            const heading = document.createElement('div');
+            heading.className = 'font-menu-group';
+            heading.setAttribute('aria-hidden', 'true');
+            heading.textContent = groupName;
+            group.appendChild(heading);
+            menu.appendChild(group);
+        }
+
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'font-menu-item';
+        item.setAttribute('role', 'menuitemradio');
+        item.setAttribute('aria-checked', 'false');
+        item.tabIndex = -1;
+        item.dataset.font = font.id;
+        item.innerHTML = '<i data-lucide="check"></i>';
+
+        const label = document.createElement('span');
+        label.textContent = font.label;
+        item.appendChild(label);
+
+        if (font.source === 'installed') {
+            const hint = document.createElement('span');
+            hint.className = 'font-menu-hint';
+            hint.textContent = 'Not installed';
+            hint.hidden = true;
+            item.appendChild(hint);
+        }
+
+        item.addEventListener('click', function () {
+            if (item.getAttribute('aria-disabled') === 'true') return;
+            applyJsonFont(font.id, true);
+            closeJsonFontMenu(true);
+        });
+        group.appendChild(item);
+    });
+
+    menu.addEventListener('keydown', onJsonFontMenuKeydown);
+}
+
+// Marks installed fonts this computer lacks. Checked on every open rather
+// than once: it is cheap, and a browser that picks up a newly installed font
+// without restarting then offers it straight away.
+function refreshJsonFontAvailability() {
+    document.querySelectorAll('#jsonFontMenu .font-menu-item').forEach(function (item) {
+        const available = isJsonFontAvailable(findJsonFont(item.dataset.font));
+        item.setAttribute('aria-disabled', String(!available));
+        const hint = item.querySelector('.font-menu-hint');
+        if (hint) hint.hidden = available;
+    });
+}
+
+function toggleJsonFontMenu() {
+    const menu = document.getElementById('jsonFontMenu');
+    if (!menu) return;
+    if (menu.hidden) openJsonFontMenu();
+    else closeJsonFontMenu(false);
+}
+
+function openJsonFontMenu() {
+    const menu = document.getElementById('jsonFontMenu');
+    const btn = document.getElementById('jsonFontBtn');
+
+    refreshJsonFontAvailability();
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+
+    // The pane clips what runs past it, so in a narrow pane, where the menu
+    // would, it opens towards the left instead.
+    menu.style.left = '';
+    const pane = menu.closest('.json-panel').getBoundingClientRect();
+    const box = menu.getBoundingClientRect();
+    if (box.right > pane.right) {
+        menu.style.left = Math.max(pane.left - box.left, pane.right - box.right) + 'px';
+    }
+
+    const current = menu.querySelector('[aria-checked="true"]') || menu.querySelector('.font-menu-item');
+    if (current) current.focus();
+    document.addEventListener('pointerdown', onJsonFontMenuOutsidePress);
+}
+
+// `restoreFocus` hands focus back to the button, for closes made from inside
+// the menu; a click elsewhere leaves focus where the click put it.
+function closeJsonFontMenu(restoreFocus) {
+    const menu = document.getElementById('jsonFontMenu');
+    const btn = document.getElementById('jsonFontBtn');
+    if (!menu || menu.hidden) return;
+
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('pointerdown', onJsonFontMenuOutsidePress);
+    if (restoreFocus) btn.focus();
+}
+
+function onJsonFontMenuOutsidePress(event) {
+    if (!event.target.closest('.font-picker')) closeJsonFontMenu(false);
+}
+
+function onJsonFontMenuKeydown(event) {
+    const items = Array.from(event.currentTarget.querySelectorAll('.font-menu-item'));
+    const index = items.indexOf(document.activeElement);
+    let next;
+
+    switch (event.key) {
+        case 'ArrowDown': next = index < items.length - 1 ? index + 1 : 0; break;
+        case 'ArrowUp': next = index > 0 ? index - 1 : items.length - 1; break;
+        case 'Home': next = 0; break;
+        case 'End': next = items.length - 1; break;
+        case 'Escape':
+            // Stopped here, or the document's Escape handler would also let go
+            // of the box being edited.
+            event.preventDefault();
+            event.stopPropagation();
+            closeJsonFontMenu(true);
+            return;
+        case 'Tab':
+            closeJsonFontMenu(false);
+            return;
+        default:
+            return;
+    }
+
+    event.preventDefault();
+    items[next].focus();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    buildJsonFontMenu();
+
+    let stored = null;
+    try {
+        stored = localStorage.getItem('jsonFont');
+    } catch (e) {
+        // ignore - fall back to the default font
+    }
+    applyJsonFont(stored || DEFAULT_JSON_FONT, false);
+
+    // The menu's check icons were added after the page's own icon pass.
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+
+    // A web font arrives after the editor has measured its text.
+    if (jsonCM && document.fonts) {
+        document.fonts.addEventListener('loadingdone', remeasureJsonEditor);
+    }
 });
 
 // ---------------------------------------------------------------------------
@@ -2106,7 +2651,7 @@ document.addEventListener('DOMContentLoaded', function () {
         jsonEditor.addEventListener('input', refreshBoundingBoxes);
     }
     // The cursor in an entry selects its box (needs CodeMirror's events).
-    if (jsonCM) jsonCM.on('cursorActivity', onEditorCursorActivity);
+    if (jsonCM) jsonEditor.addEventListener('cursoractivity', onEditorCursorActivity);
 });
 
 // ---------------------------------------------------------------------------
@@ -2128,7 +2673,8 @@ function isMountSupported() {
 function warnMountUnsupported() {
     alert(
         'Mounting folders needs the File System Access API.\n\n' +
-        'Use Chrome or Edge, and open the app at http://localhost:8000 ' +
+        'Use Chrome or Edge, and open the app at http://localhost' +
+        (location.port ? ':' + location.port : '') + ' ' +
         '(a LAN address such as http://192.168.x.x is not a secure context).'
     );
 }
@@ -2161,13 +2707,18 @@ async function mountImageFolder() {
         return; // dismissed
     }
     try {
-        mountedImages = await readDirectory(dir, ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif']);
-        if (mountedImages.size === 0) {
-            mountedImages = null;
+        // A folder that cannot be used leaves the one already mounted in place.
+        const found = await readDirectory(dir, ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif']);
+        if (found.size === 0) {
             alert('That folder contains no images.');
             return;
         }
-        await pairMountedFolders('image');
+        const previous = mountedImages;
+        mountedImages = found;
+        if (!await pairMountedFolders('image')) {
+            mountedImages = previous;
+            updateMountStatus();
+        }
     } catch (e) {
         alert('Could not read the image folder: ' + e.message);
     }
@@ -2182,13 +2733,18 @@ async function mountJsonFolder() {
         return; // dismissed
     }
     try {
-        mountedJson = await readDirectory(dir, ['json']);
-        if (mountedJson.size === 0) {
-            mountedJson = null;
+        // A folder that cannot be used leaves the one already mounted in place.
+        const found = await readDirectory(dir, ['json']);
+        if (found.size === 0) {
             alert('That folder contains no .json files.');
             return;
         }
-        await pairMountedFolders('json');
+        const previous = mountedJson;
+        mountedJson = found;
+        if (!await pairMountedFolders('json')) {
+            mountedJson = previous;
+            updateMountStatus();
+        }
     } catch (e) {
         alert('Could not read the annotation folder: ' + e.message);
     }
@@ -2196,7 +2752,8 @@ async function mountJsonFolder() {
 
 // Pairs whatever is currently mounted. Either folder can be mounted first, or
 // re-mounted later; `origin` is the side that just changed, so a single mounted
-// folder can still be browsed on its own.
+// folder can still be browsed on its own. False when the two folders share no
+// file names, in which case nothing changes.
 async function pairMountedFolders(origin) {
     updateMountStatus();
 
@@ -2217,7 +2774,7 @@ async function pairMountedFolders(origin) {
         jsonIndex = 0;
         showPagers();
         if (isImages) await showImageAt(0); else await showJsonAt(0);
-        return;
+        return true;
     }
 
     // Both mounted: pair by basename.
@@ -2237,7 +2794,7 @@ async function pairMountedFolders(origin) {
             'Image and annotation files must share the same name, e.g. ' +
             'page_0003.png and page_0003.json.'
         );
-        return;
+        return false;
     }
 
     mounted = { pages: pages };
@@ -2250,9 +2807,12 @@ async function pairMountedFolders(origin) {
     if (unmatched.length) {
         console.warn('Images without a matching .json:', unmatched);
     }
+    return true;
 }
 
 function showPagers() {
+    // An attribute rather than a style: the divider beside it keys off it.
+    document.getElementById('pageNav').hidden = false;
     document.getElementById('imagePager').style.display = 'flex';
     document.getElementById('jsonPager').style.display = 'flex';
 }
@@ -2325,14 +2885,15 @@ async function showJsonAt(index) {
     currentJsonFile = file.name;
     // The pager now owns the editor; any singly-loaded file is no longer shown.
     loadedJsonHandle = null;
+    jsonFromMountedPage = true;
     // A selection points into the old file's entries.
     clearBoxSelection();
 
     try {
-        jsonEditor.value = JSON.stringify(JSON.parse(text), null, 2);
+        loadJsonText(JSON.stringify(JSON.parse(text), null, 2));
     } catch (e) {
         // Show malformed files as-is so they can be inspected and fixed.
-        jsonEditor.value = text;
+        loadJsonText(text);
     }
 
     updatePagers();
@@ -2357,6 +2918,105 @@ function syncPages() {
     showJsonAt(imageIndex);
 }
 
+// ---------------------------------------------------------------------------
+// Page navigator
+// The toolbar control moves both panes to the same page. When the panes
+// differ it follows the image pane, so Next from image 10 and JSON 14 puts
+// both on 11; with only the JSON folder mounted there is no image page, so it
+// follows the JSON pane. Its count opens a box for jumping to a page.
+// ---------------------------------------------------------------------------
+
+// The page the navigator counts from.
+function currentPageIndex() {
+    return mountedImages ? imageIndex : jsonIndex;
+}
+
+// Shows both panes at `index`. A pane already on that page is left alone, so
+// unsaved edits there survive the other pane catching up to it.
+function showPageAt(index) {
+    if (!mounted) return;
+    const target = Math.min(Math.max(index, 0), mounted.pages.length - 1);
+    if (target !== imageIndex) showImageAt(target);
+    if (target !== jsonIndex) showJsonAt(target);
+}
+
+function stepPage(delta) {
+    if (!mounted) return;
+    showPageAt(currentPageIndex() + delta);
+}
+
+// The page a typed value names, or -1 for none. A whole number is a position
+// as the count shows it, held to the first and last page; anything else is a
+// file name, with or without its extension.
+function findPageIndex(value) {
+    const text = value.trim();
+    if (/^\d+$/.test(text)) {
+        const total = mounted.pages.length;
+        return Math.min(Math.max(parseInt(text, 10), 1), total) - 1;
+    }
+    const name = text.toLowerCase();
+    const dot = name.lastIndexOf('.');
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    return mounted.pages.findIndex(function (page) {
+        const base = page.base.toLowerCase();
+        return base === name || base === stem;
+    });
+}
+
+// Swaps the count for the jump box, filled with the current page.
+function openPageJump() {
+    if (!mounted) return;
+    const input = document.getElementById('pageJumpInput');
+    document.getElementById('pageNavCountBtn').hidden = true;
+    input.hidden = false;
+    input.value = String(currentPageIndex() + 1);
+    input.setCustomValidity('');
+    input.focus();
+    input.select();
+}
+
+function closePageJump(restoreFocus) {
+    const input = document.getElementById('pageJumpInput');
+    // Hiding the box blurs it, which calls this again.
+    if (input.hidden) return;
+    const countBtn = document.getElementById('pageNavCountBtn');
+    input.hidden = true;
+    countBtn.hidden = false;
+    if (restoreFocus) countBtn.focus();
+}
+
+function onPageJumpKeydown(event) {
+    const input = event.currentTarget;
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        // Nothing typed: nowhere to go.
+        if (!input.value.trim()) { closePageJump(true); return; }
+        const index = findPageIndex(input.value);
+        if (index < 0) {
+            input.setCustomValidity('No page is named "' + input.value.trim() + '"');
+            input.reportValidity();
+            return;
+        }
+        closePageJump(true);
+        showPageAt(index);
+    } else if (event.key === 'Escape') {
+        event.preventDefault();
+        // The document's Escape handler would also let go of the selected box.
+        event.stopPropagation();
+        closePageJump(true);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    const input = document.getElementById('pageJumpInput');
+    if (!input) return;
+    input.addEventListener('keydown', onPageJumpKeydown);
+    // Leaving the box cancels the jump.
+    input.addEventListener('blur', function () { closePageJump(false); });
+    // A rejected name stays marked only until it is changed.
+    input.addEventListener('input', function () { input.setCustomValidity(''); });
+});
+
 function updatePagers() {
     if (!mounted) return;
     const total = mounted.pages.length;
@@ -2371,6 +3031,11 @@ function updatePagers() {
         jsonLabel.innerHTML = mounted.pages[jsonIndex].base
             + ' <span class="pager-count">' + (jsonIndex + 1) + ' / ' + total + '</span>';
     }
+
+    const pageIndex = currentPageIndex();
+    document.getElementById('pageNavCount').textContent = (pageIndex + 1) + ' / ' + total;
+    document.getElementById('pageNavPrevBtn').disabled = pageIndex === 0;
+    document.getElementById('pageNavNextBtn').disabled = pageIndex === total - 1;
 
     const hasImages = !!mountedImages;
     const hasJson = !!mountedJson;
