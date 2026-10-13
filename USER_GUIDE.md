@@ -34,7 +34,7 @@ Use this for a quick look at one page.
 - **Mount Images** — pick a folder of images.
 - **Mount JSON** — pick a folder of `.json` annotation files.
 
-BornoChinho pairs the two folders **by filename**, so `page_0003.png` pairs with `page_0003.json`. Pages sort naturally, meaning `page_2` comes before `page_10`. Once mounted, pagers appear under each pane so you can step through the whole set, and **Save writes back to the original file in place** — no downloads, no re-filing.
+BornoChinho pairs the two folders **by filename**, so `page_0003.png` pairs with `page_0003.json`. Pages sort naturally, meaning `page_2` comes before `page_10`. Once mounted, a page navigator appears in the JSON editor's header and a pager under each pane so you can step through the whole set (see [Paging through a set](#paging-through-a-set)), and **Save writes back to the original file in place** — no downloads, no re-filing.
 
 You can mount just one folder and browse it alone, and re-mount either side later to switch folders.
 
@@ -75,7 +75,19 @@ Scrolled the editor away? Click inside the selected box again to bring its entry
 
 ## Paging through a set
 
-Each pane has its own pager, so you can hold an image still while scrolling through neighbouring annotation files. When the two panes drift apart, both pagers highlight and a **Sync** button appears — click it to snap the JSON pane back to the image's page.
+The **page navigator**, in the JSON editor's header beside its title, moves both panes together. `‹` and `›` step to the previous or next page, and the count between them (`3 / 120`) shows where you are. When the two panes are on different pages, the navigator follows the image: with the image on page 10 and the JSON on page 14, `›` puts both on page 11.
+
+To jump straight to a page, click the count, type, and press `Enter`. `Escape`, or clicking elsewhere, cancels.
+
+- **A number** goes to that position in the list, the number the count shows: `57` is the 57th file, whatever its name. A number past the end goes to the last page.
+- **Anything else** is a file name, with or without its extension and in any case: `page_0057` or `page_0057.png`. A name that matches no page is outlined in red and the box stays open.
+
+Positions and the numbers in file names part ways once a file is missing: without `page_0005`, position 5 is `page_0006`. A file named with digits alone, such as `0057.png`, is reached by its full name `0057.png`, because `0057` on its own is read as a position.
+
+Each pane also has its own pager, so you can hold an image still while scrolling through neighbouring annotation files. When the two panes drift apart, both pagers highlight and a **Sync** button appears — click it to snap the JSON pane back to the image's page.
+
+- Moving the JSON pane to another page discards unsaved edits in the editor, so save first. A pane the navigator finds already on the target page is left as it is.
+- On a narrow JSON pane the header makes room by dropping, in turn, the font's name, the **Load** and **Mount JSON** labels, and last the **Save** label, leaving each button's icon — hover over one to see what it does.
 
 ## Editing the JSON
 
@@ -83,7 +95,25 @@ The editor is plain text, so you can fix anything by hand. The status bar tells 
 
 - **Find & replace** — `Ctrl`+`H` opens the bar; a counter shows how many matches were found. Use Replace for one match or Replace All for every match.
 - **Right-to-left view** — the pilcrow button switches the editor to RTL, for annotating Arabic, Urdu, or other RTL scripts.
+- **Text font** — the font button (marked **T**, and showing the current font's name) picks the font for the values of `text` keys, so Bengali, Arabic, or Urdu reads the way it should. Everything else — keys, numbers, brackets, and other values such as `category` — stays monospace. The same font is used for the text excerpts in the validation dialog. See [Text fonts](#text-fonts) below.
 - **Zoom** — the floating controls in the editor scale the text independently of the image.
+
+### Text fonts
+
+| Group | Fonts |
+| --- | --- |
+| Default | Monospace |
+| Bengali | Noto Sans Bengali, Noto Serif Bengali, Hind Siliguri, Tiro Bangla |
+| Arabic & Urdu | Noto Naskh Arabic, Noto Sans Arabic, Amiri, Scheherazade New, Noto Nastaliq Urdu, Sakkal Majalla, Simplified Arabic, Traditional Arabic, KFGQPC HAFS Uthmanic Script |
+
+- Your choice is remembered between sessions, like the theme and text direction.
+- The Bengali fonts and the first five Arabic & Urdu fonts come from Google Fonts and download the first time you pick them, so they need an internet connection. Until the download finishes, or without a connection, the text shows in a fallback font.
+- **Sakkal Majalla**, **Simplified Arabic**, **Traditional Arabic**, and **KFGQPC HAFS Uthmanic Script** cannot be downloaded, so they only work on a computer where they are installed. Where one is missing, the menu shows it greyed out as *Not installed*. On Linux, copy the font files into `~/.local/share/fonts/`, run `fc-cache -f`, and restart the browser.
+  - Sakkal Majalla, Simplified Arabic, and Traditional Arabic come with Windows: `majalla.ttf` and `majallab.ttf`, `simpo.ttf` and `simpbdo.ttf`, `trado.ttf` and `tradbdo.ttf`.
+  - KFGQPC HAFS Uthmanic Script is free from the King Fahd Glorious Qur'an Printing Complex (`UthmanicHafs_V22.ttf`). Older versions, which call the font *KFGQPC Uthmanic Script HAFS*, are not recognised.
+- Sakkal Majalla draws about 30% smaller than the other Arabic fonts at the same size, so the editor shows it enlarged by 30% to match them.
+- Noto Nastaliq Urdu makes lines taller than the other fonts do.
+- On a narrow JSON pane the font's name is shortened, and on a very narrow one the button shows only the **T** — hover over it to see the name.
 
 ## Drawing new boxes
 

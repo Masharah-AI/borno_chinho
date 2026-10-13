@@ -9,8 +9,8 @@
 // addEventListener('input' | 'cursoractivity', ...).
 //
 // If CodeMirror fails to load the shim degrades to the real <textarea>, which
-// keeps the app fully usable minus the RTL isolation and the cursor -> box
-// selection.
+// keeps the app fully usable minus the RTL isolation, the cursor -> box
+// selection and the text font (which needs the "text" values marked).
 // ---------------------------------------------------------------------------
 let jsonCM = null; // the EditorView
 // True while the app itself replaces the editor text (loading a file, writing
@@ -23,6 +23,10 @@ const haveCodeMirror = typeof CM !== 'undefined';
 
 // Holds jsonRtlMode while RTL view is on, nothing otherwise.
 const jsonDirection = haveCodeMirror ? new CM.Compartment() : null;
+
+// Holds an empty theme, swapped for a fresh one to make CodeMirror re-measure
+// after the text font changes; see remeasureJsonEditor.
+const jsonRemeasure = haveCodeMirror ? new CM.Compartment() : null;
 
 // Lines of the entry whose box is selected; see highlightJsonEntry.
 const setEntryHighlight = haveCodeMirror ? CM.StateEffect.define() : null;
@@ -65,7 +69,9 @@ function createJsonEditor(textarea) {
                     ...CM.defaultKeymap,
                 ]),
                 entryHighlightField,
+                jsonTextValues,
                 jsonDirection.of(direction),
+                jsonRemeasure.of([]),
                 CM.EditorView.updateListener.of(function (update) {
                     if (update.docChanged) {
                         inputHandlers.forEach(function (handler) { handler(); });
@@ -254,6 +260,50 @@ const jsonRtlMode = haveCodeMirror ? [
         },
     }),
 ] : null;
+
+// The value of every "text" key - the annotation text - is marked so the text
+// font can style it alone (see "JSON editor text font"). Other strings, such
+// as a category, stay in the editor's monospace.
+const jsonTextValueMark = haveCodeMirror ? CM.Decoration.mark({ class: 'cm-text-value' }) : null;
+
+function findJsonTextValues(view) {
+    const builder = new CM.RangeSetBuilder();
+    const doc = view.state.doc;
+    let end = -1; // visible ranges can share a property; add it once
+    view.visibleRanges.forEach(function (range) {
+        CM.syntaxTree(view.state).iterate({
+            from: range.from,
+            to: range.to,
+            enter: function (node) {
+                if (node.name !== 'Property') return;
+                const key = node.node.getChild('PropertyName');
+                const value = node.node.lastChild;
+                if (key && value && value.name === 'String' && value.from >= end
+                        && doc.sliceString(key.from, key.to) === '"text"') {
+                    builder.add(value.from, value.to, jsonTextValueMark);
+                    end = value.to;
+                }
+            },
+        });
+    });
+    return builder.finish();
+}
+
+const jsonTextValues = haveCodeMirror ? CM.ViewPlugin.fromClass(class {
+    constructor(view) {
+        this.decorations = findJsonTextValues(view);
+        this.tree = CM.syntaxTree(view.state);
+    }
+    update(update) {
+        const tree = CM.syntaxTree(update.state);
+        if (update.docChanged || update.viewportChanged || tree !== this.tree) {
+            this.decorations = findJsonTextValues(update.view);
+            this.tree = tree;
+        }
+    }
+}, {
+    decorations: function (plugin) { return plugin.decorations; },
+}) : null;
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -1677,7 +1727,8 @@ async function saveJSON() {
             const saveBtn = document.getElementById('saveJsonBtn');
             if (saveBtn) {
                 const originalHTML = saveBtn.innerHTML;
-                saveBtn.innerHTML = '<i data-lucide="check"></i> Saved!';
+                // Wrapped like the label it replaces, which a crowded header hides.
+                saveBtn.innerHTML = '<i data-lucide="check"></i> <span class="small-btn-label">Saved!</span>';
                 saveBtn.style.background = 'var(--success-solid)';
                 saveBtn.style.color = '#ffffff';
                 if (typeof lucide !== 'undefined') lucide.createIcons();
@@ -2216,6 +2267,276 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 // ---------------------------------------------------------------------------
+// JSON editor text font
+// The values of "text" keys hold the annotation text, so they can be shown in
+// a font made for their script while everything else stays monospace. The
+// choice is the --json-text-font custom property, which the .cm-text-value
+// rule in style.css reads (jsonTextValues marks those values). Google fonts
+// are only requested once picked, so the
+// default costs no download. An installed font cannot be fetched, so it is
+// offered only on computers that have it.
+// ---------------------------------------------------------------------------
+
+// `label` doubles as the font family name; `generic` is the fallback while a
+// web font downloads or when it cannot be reached. `alias` names an
+// @font-face in style.css that resizes the font, tried before the font itself.
+const JSON_FONTS = [
+    { id: 'mono', label: 'Monospace', group: 'Default' },
+    { id: 'noto-sans-bengali', label: 'Noto Sans Bengali', group: 'Bengali', generic: 'sans-serif', source: 'google' },
+    { id: 'noto-serif-bengali', label: 'Noto Serif Bengali', group: 'Bengali', generic: 'serif', source: 'google' },
+    { id: 'hind-siliguri', label: 'Hind Siliguri', group: 'Bengali', generic: 'sans-serif', source: 'google' },
+    { id: 'tiro-bangla', label: 'Tiro Bangla', group: 'Bengali', generic: 'serif', source: 'google' },
+    { id: 'noto-naskh-arabic', label: 'Noto Naskh Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    { id: 'noto-sans-arabic', label: 'Noto Sans Arabic', group: 'Arabic & Urdu', generic: 'sans-serif', source: 'google' },
+    { id: 'amiri', label: 'Amiri', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    { id: 'scheherazade-new', label: 'Scheherazade New', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    { id: 'noto-nastaliq-urdu', label: 'Noto Nastaliq Urdu', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
+    // Ship with Windows and may not be redistributed, so they are never
+    // fetched. Sakkal Majalla draws small for its size, so it is used enlarged.
+    { id: 'sakkal-majalla', label: 'Sakkal Majalla', group: 'Arabic & Urdu', generic: 'serif', source: 'installed', alias: 'Sakkal Majalla Enlarged' },
+    { id: 'simplified-arabic', label: 'Simplified Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'installed' },
+    { id: 'traditional-arabic', label: 'Traditional Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'installed' },
+    // The King Fahd Complex's Uthmanic Hafs font (version 2 and later; earlier
+    // versions call it "KFGQPC Uthmanic Script HAFS"). Not on Google Fonts.
+    { id: 'kfgqpc-hafs', label: 'KFGQPC HAFS Uthmanic Script', group: 'Arabic & Urdu', generic: 'serif', source: 'installed' },
+];
+const DEFAULT_JSON_FONT = 'mono';
+
+function findJsonFont(id) {
+    return JSON_FONTS.find(function (font) { return font.id === id; }) || null;
+}
+
+// Families whose Google Fonts stylesheet has already been added.
+const requestedWebFonts = new Set();
+
+function requestWebFont(family) {
+    if (requestedWebFonts.has(family)) return;
+    requestedWebFonts.add(family);
+
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family='
+        + family.replace(/ /g, '+') + '&display=swap';
+    document.head.appendChild(link);
+}
+
+// Whether a font is installed on this computer. Text asked for in a missing
+// font falls back to the generic family, so it measures exactly as the generic
+// alone does. Three generics are tried in case the font happens to be one of
+// them.
+const fontProbe = document.createElement('canvas').getContext('2d');
+
+function isFontInstalled(family) {
+    const sample = 'مجلة العربية abc 123';
+    return ['monospace', 'serif', 'sans-serif'].some(function (generic) {
+        fontProbe.font = '32px ' + generic;
+        const fallbackWidth = fontProbe.measureText(sample).width;
+        fontProbe.font = '32px "' + family + '", ' + generic;
+        return fontProbe.measureText(sample).width !== fallbackWidth;
+    });
+}
+
+function isJsonFontAvailable(font) {
+    return font.source !== 'installed' || isFontInstalled(font.label);
+}
+
+// The font is set on tokens inside the lines, a change CodeMirror does not
+// notice: it keeps the old line heights and maps clicks onto the wrong line.
+// requestMeasure() is not enough, but a theme change makes it measure the
+// content again, and a fresh empty theme changes nothing else.
+function remeasureJsonEditor() {
+    if (jsonCM) jsonCM.dispatch({ effects: jsonRemeasure.reconfigure(CM.EditorView.theme({})) });
+}
+
+function applyJsonFont(id, persist) {
+    let font = findJsonFont(id);
+    // An unknown id, or an installed font since removed, gets the default.
+    if (!font || !isJsonFontAvailable(font)) font = findJsonFont(DEFAULT_JSON_FONT);
+
+    const root = document.documentElement;
+    if (font.source) {
+        if (font.source === 'google') requestWebFont(font.label);
+        const families = font.alias ? [font.alias, font.label] : [font.label];
+        root.style.setProperty('--json-text-font',
+            families.map(function (family) { return '"' + family + '"'; }).join(', ') + ', ' + font.generic);
+    } else {
+        root.style.removeProperty('--json-text-font');
+    }
+    remeasureJsonEditor();
+
+    // The button shows the font's name; the tooltip repeats it in full for
+    // when a narrow pane cuts the name short.
+    const btn = document.getElementById('jsonFontBtn');
+    const label = document.getElementById('jsonFontLabel');
+    if (label) label.textContent = font.label;
+    if (btn) {
+        btn.title = 'Text font: ' + font.label;
+        btn.setAttribute('aria-label', 'Text font: ' + font.label);
+    }
+    document.querySelectorAll('#jsonFontMenu .font-menu-item').forEach(function (item) {
+        item.setAttribute('aria-checked', String(item.dataset.font === font.id));
+    });
+
+    if (persist) {
+        try {
+            localStorage.setItem('jsonFont', font.id);
+        } catch (e) {
+            // localStorage unavailable - the font still applies this session
+        }
+    }
+}
+
+function buildJsonFontMenu() {
+    const menu = document.getElementById('jsonFontMenu');
+    if (!menu) return;
+
+    let group = null;
+    let groupName = null;
+    JSON_FONTS.forEach(function (font) {
+        if (font.group !== groupName) {
+            groupName = font.group;
+            group = document.createElement('div');
+            group.setAttribute('role', 'group');
+            group.setAttribute('aria-label', groupName);
+
+            const heading = document.createElement('div');
+            heading.className = 'font-menu-group';
+            heading.setAttribute('aria-hidden', 'true');
+            heading.textContent = groupName;
+            group.appendChild(heading);
+            menu.appendChild(group);
+        }
+
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'font-menu-item';
+        item.setAttribute('role', 'menuitemradio');
+        item.setAttribute('aria-checked', 'false');
+        item.tabIndex = -1;
+        item.dataset.font = font.id;
+        item.innerHTML = '<i data-lucide="check"></i>';
+
+        const label = document.createElement('span');
+        label.textContent = font.label;
+        item.appendChild(label);
+
+        if (font.source === 'installed') {
+            const hint = document.createElement('span');
+            hint.className = 'font-menu-hint';
+            hint.textContent = 'Not installed';
+            hint.hidden = true;
+            item.appendChild(hint);
+        }
+
+        item.addEventListener('click', function () {
+            if (item.getAttribute('aria-disabled') === 'true') return;
+            applyJsonFont(font.id, true);
+            closeJsonFontMenu(true);
+        });
+        group.appendChild(item);
+    });
+
+    menu.addEventListener('keydown', onJsonFontMenuKeydown);
+}
+
+// Marks installed fonts this computer lacks. Checked on every open rather
+// than once: it is cheap, and a browser that picks up a newly installed font
+// without restarting then offers it straight away.
+function refreshJsonFontAvailability() {
+    document.querySelectorAll('#jsonFontMenu .font-menu-item').forEach(function (item) {
+        const available = isJsonFontAvailable(findJsonFont(item.dataset.font));
+        item.setAttribute('aria-disabled', String(!available));
+        const hint = item.querySelector('.font-menu-hint');
+        if (hint) hint.hidden = available;
+    });
+}
+
+function toggleJsonFontMenu() {
+    const menu = document.getElementById('jsonFontMenu');
+    if (!menu) return;
+    if (menu.hidden) openJsonFontMenu();
+    else closeJsonFontMenu(false);
+}
+
+function openJsonFontMenu() {
+    const menu = document.getElementById('jsonFontMenu');
+    const btn = document.getElementById('jsonFontBtn');
+
+    refreshJsonFontAvailability();
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+
+    const current = menu.querySelector('[aria-checked="true"]') || menu.querySelector('.font-menu-item');
+    if (current) current.focus();
+    document.addEventListener('pointerdown', onJsonFontMenuOutsidePress);
+}
+
+// `restoreFocus` hands focus back to the button, for closes made from inside
+// the menu; a click elsewhere leaves focus where the click put it.
+function closeJsonFontMenu(restoreFocus) {
+    const menu = document.getElementById('jsonFontMenu');
+    const btn = document.getElementById('jsonFontBtn');
+    if (!menu || menu.hidden) return;
+
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('pointerdown', onJsonFontMenuOutsidePress);
+    if (restoreFocus) btn.focus();
+}
+
+function onJsonFontMenuOutsidePress(event) {
+    if (!event.target.closest('.font-picker')) closeJsonFontMenu(false);
+}
+
+function onJsonFontMenuKeydown(event) {
+    const items = Array.from(event.currentTarget.querySelectorAll('.font-menu-item'));
+    const index = items.indexOf(document.activeElement);
+    let next;
+
+    switch (event.key) {
+        case 'ArrowDown': next = index < items.length - 1 ? index + 1 : 0; break;
+        case 'ArrowUp': next = index > 0 ? index - 1 : items.length - 1; break;
+        case 'Home': next = 0; break;
+        case 'End': next = items.length - 1; break;
+        case 'Escape':
+            // Stopped here, or the document's Escape handler would also let go
+            // of the box being edited.
+            event.preventDefault();
+            event.stopPropagation();
+            closeJsonFontMenu(true);
+            return;
+        case 'Tab':
+            closeJsonFontMenu(false);
+            return;
+        default:
+            return;
+    }
+
+    event.preventDefault();
+    items[next].focus();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    buildJsonFontMenu();
+
+    let stored = null;
+    try {
+        stored = localStorage.getItem('jsonFont');
+    } catch (e) {
+        // ignore - fall back to the default font
+    }
+    applyJsonFont(stored || DEFAULT_JSON_FONT, false);
+
+    // The menu's check icons were added after the page's own icon pass.
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+
+    // A web font arrives after the editor has measured its text.
+    if (jsonCM && document.fonts) {
+        document.fonts.addEventListener('loadingdone', remeasureJsonEditor);
+    }
+});
+
+// ---------------------------------------------------------------------------
 // Status footer
 // Reads current state directly rather than hooking every mutation site, and is
 // refreshed on the events that can change it.
@@ -2433,6 +2754,8 @@ async function pairMountedFolders(origin) {
 }
 
 function showPagers() {
+    // An attribute rather than a style: the divider beside it keys off it.
+    document.getElementById('pageNav').hidden = false;
     document.getElementById('imagePager').style.display = 'flex';
     document.getElementById('jsonPager').style.display = 'flex';
 }
@@ -2537,6 +2860,105 @@ function syncPages() {
     showJsonAt(imageIndex);
 }
 
+// ---------------------------------------------------------------------------
+// Page navigator
+// The toolbar control moves both panes to the same page. When the panes
+// differ it follows the image pane, so Next from image 10 and JSON 14 puts
+// both on 11; with only the JSON folder mounted there is no image page, so it
+// follows the JSON pane. Its count opens a box for jumping to a page.
+// ---------------------------------------------------------------------------
+
+// The page the navigator counts from.
+function currentPageIndex() {
+    return mountedImages ? imageIndex : jsonIndex;
+}
+
+// Shows both panes at `index`. A pane already on that page is left alone, so
+// unsaved edits there survive the other pane catching up to it.
+function showPageAt(index) {
+    if (!mounted) return;
+    const target = Math.min(Math.max(index, 0), mounted.pages.length - 1);
+    if (target !== imageIndex) showImageAt(target);
+    if (target !== jsonIndex) showJsonAt(target);
+}
+
+function stepPage(delta) {
+    if (!mounted) return;
+    showPageAt(currentPageIndex() + delta);
+}
+
+// The page a typed value names, or -1 for none. A whole number is a position
+// as the count shows it, held to the first and last page; anything else is a
+// file name, with or without its extension.
+function findPageIndex(value) {
+    const text = value.trim();
+    if (/^\d+$/.test(text)) {
+        const total = mounted.pages.length;
+        return Math.min(Math.max(parseInt(text, 10), 1), total) - 1;
+    }
+    const name = text.toLowerCase();
+    const dot = name.lastIndexOf('.');
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    return mounted.pages.findIndex(function (page) {
+        const base = page.base.toLowerCase();
+        return base === name || base === stem;
+    });
+}
+
+// Swaps the count for the jump box, filled with the current page.
+function openPageJump() {
+    if (!mounted) return;
+    const input = document.getElementById('pageJumpInput');
+    document.getElementById('pageNavCountBtn').hidden = true;
+    input.hidden = false;
+    input.value = String(currentPageIndex() + 1);
+    input.setCustomValidity('');
+    input.focus();
+    input.select();
+}
+
+function closePageJump(restoreFocus) {
+    const input = document.getElementById('pageJumpInput');
+    // Hiding the box blurs it, which calls this again.
+    if (input.hidden) return;
+    const countBtn = document.getElementById('pageNavCountBtn');
+    input.hidden = true;
+    countBtn.hidden = false;
+    if (restoreFocus) countBtn.focus();
+}
+
+function onPageJumpKeydown(event) {
+    const input = event.currentTarget;
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        // Nothing typed: nowhere to go.
+        if (!input.value.trim()) { closePageJump(true); return; }
+        const index = findPageIndex(input.value);
+        if (index < 0) {
+            input.setCustomValidity('No page is named "' + input.value.trim() + '"');
+            input.reportValidity();
+            return;
+        }
+        closePageJump(true);
+        showPageAt(index);
+    } else if (event.key === 'Escape') {
+        event.preventDefault();
+        // The document's Escape handler would also let go of the selected box.
+        event.stopPropagation();
+        closePageJump(true);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    const input = document.getElementById('pageJumpInput');
+    if (!input) return;
+    input.addEventListener('keydown', onPageJumpKeydown);
+    // Leaving the box cancels the jump.
+    input.addEventListener('blur', function () { closePageJump(false); });
+    // A rejected name stays marked only until it is changed.
+    input.addEventListener('input', function () { input.setCustomValidity(''); });
+});
+
 function updatePagers() {
     if (!mounted) return;
     const total = mounted.pages.length;
@@ -2551,6 +2973,11 @@ function updatePagers() {
         jsonLabel.innerHTML = mounted.pages[jsonIndex].base
             + ' <span class="pager-count">' + (jsonIndex + 1) + ' / ' + total + '</span>';
     }
+
+    const pageIndex = currentPageIndex();
+    document.getElementById('pageNavCount').textContent = (pageIndex + 1) + ' / ' + total;
+    document.getElementById('pageNavPrevBtn').disabled = pageIndex === 0;
+    document.getElementById('pageNavNextBtn').disabled = pageIndex === total - 1;
 
     const hasImages = !!mountedImages;
     const hasJson = !!mountedJson;

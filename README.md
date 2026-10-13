@@ -10,8 +10,10 @@ A web-based image annotation tool for document layout datasets. Draw bounding bo
 ## Features
 
 - **Draw and edit boxes** over an uploaded image, with zoom, pan, and multi-image paging
+- **Page navigator** — step the image and its JSON together, or jump straight to a page by number or file name
 - **Drag box sides on the image** — select a box from the JSON and move its sides; the coordinates update in the editor, ready to Save. Selecting a box highlights its entry in the editor, and putting the cursor in an entry selects its box
 - **Live JSON editor** beside the canvas, with find & replace (`Ctrl`+`H`)
+- **Text fonts for Bengali, Arabic and Urdu** — show annotation text in a font made for its script, alongside a right-to-left view
 - **Validation** of annotation schema, category names, and bbox coordinates
 - **HTML table style checking** for `Table` annotations (CSS property validation)
 - **Light and dark themes**, resizable split view
@@ -29,6 +31,7 @@ templates/index.html    UI
 static/                 Frontend JS, CSS, and images
   vendor/               CodeMirror 6 bundle behind the JSON editor
 tools/codemirror/       Rebuilds that bundle (Node: npm ci && npm run build)
+  build.mjs             Build script; corrects CodeMirror's bidi class for "/"
 ```
 
 

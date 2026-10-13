@@ -3,7 +3,7 @@
   "private": true,
   "description": "Builds static/vendor/codemirror.min.js, the CodeMirror 6 bundle behind the JSON editor.",
   "scripts": {
-    "build": "node node_modules/esbuild/bin/esbuild entry.js --bundle --minify --format=iife --global-name=CM --target=es2020 \"--banner:js=/*! CodeMirror 6 (MIT, https://codemirror.net) - built from tools/codemirror: npm ci && npm run build */\" --outfile=../../static/vendor/codemirror.min.js"
+    "build": "node build.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.1",

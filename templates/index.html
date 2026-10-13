@@ -162,23 +162,53 @@
                     </div>
                     <div class="panel-toolbar-right">
                         <input type="file" id="jsonFileInput" accept=".json" style="display: none;">
+                        <!-- Page navigator: moves the image and the JSON together, following
+                             the image pane when they differ (visible once folders are mounted).
+                             The count opens a box for jumping to a page; script.js swaps them. -->
+                        <nav class="page-nav" id="pageNav" aria-label="Page" hidden>
+                            <button class="icon-btn" id="pageNavPrevBtn" title="Previous page" onclick="stepPage(-1)">
+                                <i data-lucide="chevron-left"></i>
+                            </button>
+                            <button class="page-nav-count" id="pageNavCountBtn" title="Go to page" onclick="openPageJump()">
+                                <span id="pageNavCount">&ndash;</span>
+                            </button>
+                            <input type="text" class="page-nav-input" id="pageJumpInput" hidden
+                                   placeholder="Page or name" autocomplete="off" spellcheck="false"
+                                   aria-label="Go to page: a page number or a file name">
+                            <button class="icon-btn" id="pageNavNextBtn" title="Next page" onclick="stepPage(1)">
+                                <i data-lucide="chevron-right"></i>
+                            </button>
+                        </nav>
+                        <div class="divider page-nav-divider"></div>
                         <button class="icon-btn" id="jsonDirBtn" onclick="toggleJsonDirection()"
                                 title="Switch to right-to-left view" aria-pressed="false">
                             <i data-lucide="pilcrow-left" class="dir-icon-ltr"></i>
                             <i data-lucide="pilcrow-right" class="dir-icon-rtl"></i>
                         </button>
+                        <!-- Font for the annotation text; script.js fills the menu -->
+                        <div class="font-picker">
+                            <button class="small-btn font-btn" id="jsonFontBtn" onclick="toggleJsonFontMenu()"
+                                    title="Text font" aria-haspopup="menu" aria-expanded="false"
+                                    aria-controls="jsonFontMenu">
+                                <i data-lucide="type"></i>
+                                <span class="font-btn-label" id="jsonFontLabel">Monospace</span>
+                                <i data-lucide="chevron-down" class="font-btn-caret"></i>
+                            </button>
+                            <div class="font-menu" id="jsonFontMenu" role="menu" aria-label="Text font" hidden></div>
+                        </div>
                         <div class="divider"></div>
+                        <!-- The labels are wrapped so a crowded header can drop them -->
                         <button class="small-btn" title="Load a single JSON file" onclick="openJsonFile()">
                             <i data-lucide="upload"></i>
-                            Load
+                            <span class="small-btn-label">Load</span>
                         </button>
                         <button class="small-btn" id="mountJsonBtn" title="Mount a folder of annotations" onclick="mountJsonFolder()">
                             <i data-lucide="folder-open"></i>
-                            Mount JSON
+                            <span class="small-btn-label">Mount JSON</span>
                         </button>
-                        <button class="small-btn primary" id="saveJsonBtn" onclick="saveJSON()">
+                        <button class="small-btn primary" id="saveJsonBtn" title="Save the JSON file" onclick="saveJSON()">
                             <i data-lucide="save"></i>
-                            Save
+                            <span class="small-btn-label">Save</span>
                         </button>
                     </div>
                 </header>
