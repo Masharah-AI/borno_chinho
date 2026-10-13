@@ -1,54 +1,139 @@
 // ---------------------------------------------------------------------------
 // JSON editor
-// Backed by CodeMirror so RTL mode can isolate each string VALUE as its own
-// bidi run (see applyJsonDirection). The rest of the app predates that change
-// and talks to the editor as if it were the original <textarea>, so this
-// returns a shim exposing the same surface: .value, .setSelectionRange(),
-// .focus(), .style.fontSize and addEventListener('input', ...).
+// Backed by CodeMirror 6 so RTL mode can lay each string out as its own
+// isolated right-to-left run and still have clicks, the caret and selections
+// land on the text as drawn (see jsonRtlMode). The rest of the app predates
+// CodeMirror and talks to the editor as if it were the original <textarea>,
+// so this returns a shim exposing the same surface: .value, .load(),
+// .setSelectionRange(), .focus(), .style.fontSize, .classList and
+// addEventListener('input' | 'cursoractivity', ...).
 //
 // If CodeMirror fails to load the shim degrades to the real <textarea>, which
-// keeps the app fully usable minus the per-value RTL isolation.
+// keeps the app fully usable minus the RTL isolation and the cursor -> box
+// selection.
 // ---------------------------------------------------------------------------
-let jsonCM = null;
+let jsonCM = null; // the EditorView
 // True while the app itself replaces the editor text (loading a file, writing
 // a dragged box side). The cursor moves then too, but it is not the user
-// moving it, so the cursor -> box selection ignores it.
+// moving it, so 'cursoractivity' is not reported for it.
 let jsonTextIsBeingSet = false;
 
+// False when the CodeMirror bundle failed to load (see the fallback above).
+const haveCodeMirror = typeof CM !== 'undefined';
+
+// Holds jsonRtlMode while RTL view is on, nothing otherwise.
+const jsonDirection = haveCodeMirror ? new CM.Compartment() : null;
+
+// Lines of the entry whose box is selected; see highlightJsonEntry.
+const setEntryHighlight = haveCodeMirror ? CM.StateEffect.define() : null;
+
 function createJsonEditor(textarea) {
-    if (!textarea || typeof CodeMirror === 'undefined') return textarea;
+    if (!textarea || !haveCodeMirror) return textarea;
 
-    jsonCM = CodeMirror.fromTextArea(textarea, {
-        mode: { name: 'javascript', json: true },
-        lineNumbers: false,
-        lineWrapping: true,
-        viewportMargin: Infinity,
-    });
+    const inputHandlers = [];
+    const cursorHandlers = [];
+    let cursorReportPending = false;
 
-    // fromTextArea leaves the original <textarea> in the DOM, hidden. Move the
-    // id onto the wrapper so #jsonEditor styling and getElementById reach the
-    // visible editor - two elements sharing an id would silently resolve to the
-    // hidden textarea and every style/class toggle would go nowhere.
-    const wrapper = jsonCM.getWrapperElement();
-    textarea.removeAttribute('id');
-    wrapper.id = 'jsonEditor';
+    // Reported after the update that moved the cursor has finished: the
+    // handlers highlight lines and scroll, and CodeMirror refuses changes
+    // made from inside one of its own updates.
+    function reportCursorActivity() {
+        if (cursorReportPending) return;
+        cursorReportPending = true;
+        queueMicrotask(function () {
+            cursorReportPending = false;
+            cursorHandlers.forEach(function (handler) { handler(); });
+        });
+    }
+
+    function createState(text, direction) {
+        return CM.EditorState.create({
+            doc: text,
+            extensions: [
+                CM.json(),
+                CM.syntaxHighlighting(CM.classHighlighter),
+                CM.history(),
+                CM.drawSelection(),
+                CM.highlightSpecialChars(),
+                CM.EditorView.lineWrapping,
+                CM.placeholder(textarea.placeholder || ''),
+                CM.keymap.of([
+                    // Tab inserts a tab, or indents a selection, rather than
+                    // moving focus out of the editor.
+                    { key: 'Tab', run: CM.insertTab, shift: CM.indentLess },
+                    ...CM.historyKeymap,
+                    ...CM.defaultKeymap,
+                ]),
+                entryHighlightField,
+                jsonDirection.of(direction),
+                CM.EditorView.updateListener.of(function (update) {
+                    if (update.docChanged) {
+                        inputHandlers.forEach(function (handler) { handler(); });
+                    }
+                    if ((update.docChanged || update.selectionSet) && !jsonTextIsBeingSet) {
+                        reportCursorActivity();
+                    }
+                }),
+            ],
+        });
+    }
+
+    jsonCM = new CM.EditorView({ state: createState(textarea.value, []) });
+    textarea.replaceWith(jsonCM.dom);
+    // The id moves onto the editor so #jsonEditor styling and getElementById
+    // reach the visible element.
+    jsonCM.dom.id = 'jsonEditor';
+    const wrapper = jsonCM.dom;
 
     return {
         cm: jsonCM,
         el: wrapper,
 
-        get value() { return jsonCM.getValue(); },
+        get value() { return jsonCM.state.doc.toString(); },
+        // Programmatic edits (find & replace, a dragged box side). Only the
+        // span that actually differs is replaced, so the cursor, the scroll
+        // position and the entry highlight stay where they are, and the edit
+        // is a single undo step of its own.
         set value(v) {
-            // Preserve the cursor so programmatic refreshes (updateJSON on every
-            // box edit) don't yank the caret to the top while the user types.
-            const cursor = jsonCM.getCursor();
+            const text = v == null ? '' : String(v);
+            const old = jsonCM.state.doc.toString();
+            if (text === old) return;
+
+            let start = 0;
+            const shorter = Math.min(old.length, text.length);
+            while (start < shorter && old[start] === text[start]) start++;
+            let oldEnd = old.length;
+            let newEnd = text.length;
+            while (oldEnd > start && newEnd > start && old[oldEnd - 1] === text[newEnd - 1]) {
+                oldEnd--;
+                newEnd--;
+            }
+
             jsonTextIsBeingSet = true;
             try {
-                jsonCM.setValue(v == null ? '' : String(v));
-                jsonCM.setCursor(cursor);
+                jsonCM.dispatch({
+                    changes: { from: start, to: oldEnd, insert: text.slice(start, newEnd) },
+                    annotations: CM.isolateHistory.of('full'),
+                });
             } finally {
                 jsonTextIsBeingSet = false;
             }
+        },
+
+        // Shows a newly opened file: fresh undo history, cursor and scroll at
+        // the top, so Ctrl+Z cannot step back into the previous file.
+        load(text) {
+            jsonTextIsBeingSet = true;
+            try {
+                jsonCM.setState(createState(text == null ? '' : String(text), jsonDirection.get(jsonCM.state)));
+                // setState keeps the old scroll offset, which in a shorter
+                // file lands at its end.
+                jsonCM.dispatch({ effects: CM.EditorView.scrollIntoView(0, { y: 'start' }) });
+            } finally {
+                jsonTextIsBeingSet = false;
+            }
+            // setState is not an update, so tell the listeners here.
+            inputHandlers.forEach(function (handler) { handler(); });
         },
 
         get classList() { return wrapper.classList; },
@@ -56,17 +141,119 @@ function createJsonEditor(textarea) {
 
         focus() { jsonCM.focus(); },
 
-        // Character offsets in / line-ch out, so find-and-replace keeps working.
         setSelectionRange(start, end) {
-            jsonCM.setSelection(jsonCM.posFromIndex(start), jsonCM.posFromIndex(end));
+            jsonCM.dispatch({ selection: { anchor: start, head: end }, scrollIntoView: true });
         },
 
         addEventListener(type, handler) {
-            if (type === 'input') jsonCM.on('change', handler);
+            if (type === 'input') inputHandlers.push(handler);
+            else if (type === 'cursoractivity') cursorHandlers.push(handler);
             else wrapper.addEventListener(type, handler);
         },
     };
 }
+
+// Shows a newly opened file in the editor. Unlike assigning .value, this
+// starts a fresh undo history.
+function loadJsonText(text) {
+    if (typeof jsonEditor.load === 'function') {
+        jsonEditor.load(text);
+    } else {
+        // The textarea fallback fires no 'input' for a scripted change.
+        jsonEditor.value = text;
+        jsonEditor.dispatchEvent(new Event('input'));
+    }
+}
+
+// The highlighted entry's lines, as line decorations. They follow edits on
+// their own; highlightJsonEntry replaces them as the selection changes.
+const entryLineMark = haveCodeMirror ? CM.Decoration.line({ class: 'cm-selected-entry' }) : null;
+
+const entryHighlightField = haveCodeMirror ? CM.StateField.define({
+    create() { return CM.Decoration.none; },
+    update(lines, tr) {
+        lines = lines.map(tr.changes);
+        tr.effects.forEach(function (effect) {
+            if (!effect.is(setEntryHighlight)) return;
+            if (!effect.value) {
+                lines = CM.Decoration.none;
+                return;
+            }
+            const doc = tr.state.doc;
+            const builder = new CM.RangeSetBuilder();
+            const last = doc.lineAt(effect.value.to).number;
+            for (let n = doc.lineAt(effect.value.from).number; n <= last; n++) {
+                const from = doc.line(n).from;
+                builder.add(from, from, entryLineMark);
+            }
+            lines = builder.finish();
+        });
+        return lines;
+    },
+    provide: function (field) { return CM.EditorView.decorations.from(field); },
+}) : null;
+
+// RTL view. The whole editor runs right to left, and every quoted string -
+// keys and values - is its own isolated RTL run. Isolation is what keeps the
+// neutral characters at a value's edges ((*), brackets, ':') with the Arabic
+// they belong to, instead of drifting towards the Latin key beside them.
+// Registering the isolates with CodeMirror (bidiIsolatedRanges) is what makes
+// clicks, the caret and selections follow that layout; CodeMirror 5 had no
+// notion of isolates, so English text in RTL view could not be clicked into.
+const jsonRtlIsolate = haveCodeMirror ? CM.Decoration.mark({
+    attributes: { dir: 'rtl', style: 'unicode-bidi: isolate' },
+    bidiIsolate: CM.Direction.RTL,
+}) : null;
+
+function findJsonStringIsolates(view) {
+    const builder = new CM.RangeSetBuilder();
+    let end = -1; // visible ranges can share a string; add it once
+    view.visibleRanges.forEach(function (range) {
+        CM.syntaxTree(view.state).iterate({
+            from: range.from,
+            to: range.to,
+            enter: function (node) {
+                if (node.name !== 'String' && node.name !== 'PropertyName') return;
+                if (node.from >= end) {
+                    builder.add(node.from, node.to, jsonRtlIsolate);
+                    end = node.to;
+                }
+                return false;
+            },
+        });
+    });
+    return builder.finish();
+}
+
+const jsonRtlMode = haveCodeMirror ? [
+    CM.EditorView.contentAttributes.of({ dir: 'rtl' }),
+    // CodeMirror rewrites its root element's class list on every update, so
+    // the `rtl` marker has to come through it to stick.
+    CM.EditorView.editorAttributes.of({ class: 'rtl' }),
+    CM.ViewPlugin.fromClass(class {
+        constructor(view) {
+            this.isolates = findJsonStringIsolates(view);
+            this.tree = CM.syntaxTree(view.state);
+        }
+        update(update) {
+            const tree = CM.syntaxTree(update.state);
+            if (update.docChanged || update.viewportChanged || tree !== this.tree) {
+                this.isolates = findJsonStringIsolates(update.view);
+                this.tree = tree;
+            }
+        }
+    }, {
+        provide: function (plugin) {
+            function isolates(view) {
+                const value = view.plugin(plugin);
+                return value ? value.isolates : CM.Decoration.none;
+            }
+            // Outer decorations wrap the syntax colouring, so nothing splits
+            // a string's isolate into pieces.
+            return [CM.EditorView.outerDecorations.of(isolates), CM.EditorView.bidiIsolatedRanges.of(isolates)];
+        },
+    }),
+] : null;
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -171,7 +358,7 @@ async function displayJSONFile(file) {
     currentJsonFile = data.name || file.name;
     // A selection points into the old file's entries.
     clearBoxSelection();
-    jsonEditor.value = JSON.stringify(data.content, null, 2);
+    loadJsonText(JSON.stringify(data.content, null, 2));
     refreshBoundingBoxes();
     return true;
 }
@@ -956,21 +1143,12 @@ function selectJsonBox(entryIndex, fromEditor) {
     else revealJsonEntry(entryIndex);
 }
 
-// Lines of the editor highlighted as the selected box's entry.
-let entryHighlightLines = [];
-
 // Breathing room, in pixels, kept around an entry scrolled into view.
 const ENTRY_REVEAL_MARGIN = 24;
 
 function clearEntryHighlight() {
     if (!jsonCM) return;
-    entryHighlightLines.forEach(function (handle) {
-        // Lines replaced since (every box edit rewrites the text) are gone.
-        if (jsonCM.getLineNumber(handle) !== null) {
-            jsonCM.removeLineClass(handle, 'background', 'cm-selected-entry');
-        }
-    });
-    entryHighlightLines = [];
+    jsonCM.dispatch({ effects: setEntryHighlight.of(null) });
 }
 
 // Highlights an entry's lines in the editor, replacing any earlier highlight.
@@ -980,7 +1158,7 @@ function highlightJsonEntry(entryIndex) {
     if (!jsonCM) return null;
     clearEntryHighlight();
 
-    const text = jsonCM.getValue();
+    const text = jsonCM.state.doc.toString();
     let parsed;
     try {
         parsed = JSON.parse(text);
@@ -992,12 +1170,9 @@ function highlightJsonEntry(entryIndex) {
     const range = locateJsonValue(text, path);
     if (!range) return null;
 
-    const from = jsonCM.posFromIndex(range.start);
-    const to = jsonCM.posFromIndex(range.end);
-    for (let line = from.line; line <= to.line; line++) {
-        entryHighlightLines.push(jsonCM.addLineClass(line, 'background', 'cm-selected-entry'));
-    }
-    return { text: text, path: path, from: from, to: to };
+    const entry = { text: text, path: path, from: range.start, to: range.end };
+    jsonCM.dispatch({ effects: setEntryHighlight.of(entry) });
+    return entry;
 }
 
 // Highlights an entry and scrolls the editor the least distance that brings
@@ -1009,15 +1184,17 @@ function revealJsonEntry(entryIndex) {
     if (!entry) return;
 
     let target = { from: entry.from, to: entry.to };
-    const height = jsonCM.charCoords(entry.to, 'local').bottom
-        - jsonCM.charCoords(entry.from, 'local').top;
-    if (height > jsonCM.getScrollInfo().clientHeight - 2 * ENTRY_REVEAL_MARGIN) {
+    const height = jsonCM.lineBlockAt(entry.to).bottom - jsonCM.lineBlockAt(entry.from).top;
+    if (height > jsonCM.scrollDOM.clientHeight - 2 * ENTRY_REVEAL_MARGIN) {
         const bbox = locateJsonValue(entry.text, entry.path.concat('bbox'));
-        if (bbox) {
-            target = { from: jsonCM.posFromIndex(bbox.start), to: jsonCM.posFromIndex(bbox.end) };
-        }
+        if (bbox) target = { from: bbox.start, to: bbox.end };
     }
-    jsonCM.scrollIntoView(target, ENTRY_REVEAL_MARGIN);
+    jsonCM.dispatch({
+        effects: CM.EditorView.scrollIntoView(CM.EditorSelection.range(target.from, target.to), {
+            y: 'nearest',
+            yMargin: ENTRY_REVEAL_MARGIN,
+        }),
+    });
 }
 
 // Scrolls the image the least distance that shows `box`, so a box selected
@@ -1048,18 +1225,23 @@ function revealBoxOnCanvas(box) {
 // The editor -> image direction. With the boxes showing, putting the cursor
 // in an entry (click, arrow keys, find) highlights it and selects its box; an
 // entry without a usable bbox is highlighted with no box selected. Text the
-// app rewrites itself is not the user's cursor and is skipped (see
-// jsonTextIsBeingSet).
+// app rewrites itself is not the user's cursor and is never reported here
+// (see jsonTextIsBeingSet).
 function onEditorCursorActivity() {
-    if (jsonTextIsBeingSet || !showBoundingBoxes || bboxDrag) return;
+    if (!showBoundingBoxes || bboxDrag) return;
 
-    const entryIndex = findEntryAt(jsonCM.getValue(), jsonCM.indexFromPos(jsonCM.getCursor()));
+    const head = jsonCM.state.selection.main.head;
+    const entryIndex = findEntryAt(jsonCM.state.doc.toString(), head);
     if (entryIndex === null) return; // e.g. on the opening "[" line
 
     // Selecting can show or hide the coordinates panel above the editor, which
     // resizes the editor from the top and would shift the text under the
     // user's pointer. Note where the cursor's line sits so it can stay put.
-    const anchor = jsonCM.cursorCoords(null, 'window').top;
+    const cursorTop = function () {
+        const coords = jsonCM.coordsAtPos(head);
+        return coords ? coords.top : null;
+    };
+    const anchor = cursorTop();
 
     const box = findJsonBox(getJsonBoundingBoxes(), entryIndex);
     if (!box) {
@@ -1073,8 +1255,10 @@ function onEditorCursorActivity() {
         highlightJsonEntry(entryIndex);
     }
 
-    const shift = jsonCM.cursorCoords(null, 'window').top - anchor;
-    if (shift) jsonCM.scrollTo(null, jsonCM.getScrollInfo().top + shift);
+    const after = cursorTop();
+    if (anchor !== null && after !== null && after !== anchor) {
+        jsonCM.scrollDOM.scrollTop += after - anchor;
+    }
 }
 
 // Drops the selection, abandoning any drag in progress without writing it.
@@ -1681,7 +1865,7 @@ document.addEventListener('keydown', function(e) {
 
 // Initialize on page load
 window.addEventListener('load', function() {
-    jsonEditor.value = '';
+    loadJsonText('');
     // initialize JSON editor font-size based on zoom
     if (jsonEditor) {
         jsonEditor.style.fontSize = `${baseJsonFontSize * jsonZoomLevel}px`;
@@ -1696,8 +1880,8 @@ function updateJsonZoomDisplay() {
     const zEl = document.getElementById('jsonZoomLevel');
     if (zEl) zEl.textContent = `${Math.round(jsonZoomLevel * 100)}%`;
     if (jsonEditor) jsonEditor.style.fontSize = `${baseJsonFontSize * jsonZoomLevel}px`;
-    // CodeMirror measures character width once; re-measure after a size change.
-    if (jsonCM) jsonCM.refresh();
+    // Line heights and character widths change with the font size.
+    if (jsonCM) jsonCM.requestMeasure();
 }
 
 function zoomJsonIn() {
@@ -1988,20 +2172,16 @@ document.addEventListener('keydown', function (e) {
 
 // ---------------------------------------------------------------------------
 // JSON editor text direction (LTR / RTL)
-// RTL mode keeps the JSON structure (keys, braces, commas) reading left to
-// right and flips only the quoted string VALUES, each of which becomes its own
-// isolated RTL run. Isolation is what makes leading markers like "(*)" sit on
-// the right: without it the Latin key to the left of the string pulls those
-// neutral characters back to the LTR side. See the .cm-string rules in
-// style.css - the work is done there; this only toggles the class.
+// RTL mode turns the whole editor right to left and makes every quoted string
+// its own isolated RTL run - see jsonRtlMode for why, and for how CodeMirror
+// is told about it. The editor's `rtl` class records the mode.
 // ---------------------------------------------------------------------------
 function applyJsonDirection(dir, persist) {
     const rtl = dir === 'rtl';
     const btn = document.getElementById('jsonDirBtn');
 
-    if (jsonEditor) jsonEditor.classList.toggle('rtl', rtl);
-    // CodeMirror caches character metrics; force a re-measure after the flip.
-    if (jsonCM) jsonCM.refresh();
+    if (jsonCM) jsonCM.dispatch({ effects: jsonDirection.reconfigure(rtl ? jsonRtlMode : []) });
+    else if (jsonEditor) jsonEditor.classList.toggle('rtl', rtl);
 
     if (btn) {
         btn.classList.toggle('is-rtl', rtl);
@@ -2106,7 +2286,7 @@ document.addEventListener('DOMContentLoaded', function () {
         jsonEditor.addEventListener('input', refreshBoundingBoxes);
     }
     // The cursor in an entry selects its box (needs CodeMirror's events).
-    if (jsonCM) jsonCM.on('cursorActivity', onEditorCursorActivity);
+    if (jsonCM) jsonEditor.addEventListener('cursoractivity', onEditorCursorActivity);
 });
 
 // ---------------------------------------------------------------------------
@@ -2329,10 +2509,10 @@ async function showJsonAt(index) {
     clearBoxSelection();
 
     try {
-        jsonEditor.value = JSON.stringify(JSON.parse(text), null, 2);
+        loadJsonText(JSON.stringify(JSON.parse(text), null, 2));
     } catch (e) {
         // Show malformed files as-is so they can be inspected and fixed.
-        jsonEditor.value = text;
+        loadJsonText(text);
     }
 
     updatePagers();

@@ -27,13 +27,12 @@
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
 
-    <!-- CodeMirror 5 backs the JSON editor. A plain <textarea> renders one flat
+    <!-- CodeMirror 6 backs the JSON editor. A plain <textarea> renders one flat
          text node, so there is no way to isolate each string value as its own
-         bidi run; CodeMirror tokenises the JSON, which lets RTL mode style the
-         string tokens alone. -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+         bidi run; CodeMirror tokenises the JSON, and unlike CodeMirror 5 it
+         maps clicks, the caret and selections through those isolated runs.
+         Bundled locally (see tools/codemirror), and it injects its own CSS. -->
+    <script src="/static/vendor/codemirror.min.js"></script>
 </head>
 <body>
     <!-- Main Container -->

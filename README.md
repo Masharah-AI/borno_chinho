@@ -27,6 +27,8 @@ services/
   html_parser.py        HTML tag and CSS extraction for tables
 templates/index.html    UI
 static/                 Frontend JS, CSS, and images
+  vendor/               CodeMirror 6 bundle behind the JSON editor
+tools/codemirror/       Rebuilds that bundle (Node: npm ci && npm run build)
 ```
 
 

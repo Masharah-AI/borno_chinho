@@ -751,48 +751,44 @@ body.is-resizing canvas {
     transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-#jsonEditor::placeholder {
+#jsonEditor .cm-placeholder {
     color: var(--text-muted);
 }
 
 #jsonEditor:focus,
-#jsonEditor.CodeMirror-focused {
+#jsonEditor.cm-focused {
     border-color: var(--accent-primary);
     box-shadow: 0 0 0 3px var(--focus-ring);
+    /* CodeMirror's own focus ring; the frame above replaces it. */
+    outline: none;
 }
 
 /* CodeMirror internals: inherit the theme rather than ship its own palette.
-   The wrapper carries #jsonEditor, so it already has the frame, padding and
-   font; these make the inner layers transparent and let it fill the panel. */
-#jsonEditor.CodeMirror {
-    height: auto;
+   The editor element carries #jsonEditor, so it already has the frame,
+   padding and font; these let the scroller fill the panel and pick up the
+   theme's font, cursor and selection colours. */
+#jsonEditor .cm-scroller {
     font-family: var(--font-mono);
     line-height: 1.6;
+    overflow: auto;
 }
 
-#jsonEditor .CodeMirror-scroll {
-    background: transparent;
-}
-
-#jsonEditor .CodeMirror-gutters {
-    display: none;
-}
-
-#jsonEditor .CodeMirror-cursor {
+#jsonEditor .cm-cursor {
     border-left-color: var(--text-primary);
 }
 
-#jsonEditor .CodeMirror-selected {
+#jsonEditor .cm-selectionBackground,
+#jsonEditor.cm-focused .cm-selectionBackground {
     background: var(--focus-ring);
 }
 
-/* Token colours, mapped to the existing JSON highlight variables. Keys carry
-   both cm-string and cm-property, so cm-property must win - it is listed last
-   at equal specificity. */
-#jsonEditor .cm-string { color: var(--json-string); }
-#jsonEditor .cm-number { color: var(--json-number); }
-#jsonEditor .cm-atom { color: var(--json-boolean); }
-#jsonEditor .cm-property { color: var(--json-key); }
+/* Token colours, mapped to the existing JSON highlight variables. JSON's
+   null is tagged as a keyword, so it shares the true/false colour. */
+#jsonEditor .tok-string { color: var(--json-string); }
+#jsonEditor .tok-number { color: var(--json-number); }
+#jsonEditor .tok-bool,
+#jsonEditor .tok-keyword { color: var(--json-boolean); }
+#jsonEditor .tok-propertyName { color: var(--json-key); }
 
 /* Lines of the entry whose box is selected on the image. */
 #jsonEditor .cm-selected-entry {
@@ -969,38 +965,16 @@ body.is-resizing canvas {
 /* ---------------------------------------------------------------------------
    JSON editor text direction
 
-   LTR mode is plain left-to-right: no bidi overrides, so mixed-script values
-   still shape correctly via the default Unicode Bidi Algorithm.
-
-   RTL mode turns the WHOLE editor right-to-left - structure included. Lines
-   start at the right edge, and braces, commas and colons take their RTL
-   positions.
-
-   Each string value additionally gets its own isolated RTL run. That is not
-   redundant: without `isolate`, the neutral characters at a value's edges -
-   (*), brackets, ':' - resolve against the Latin key next to them rather than
-   against the Arabic they belong to, and drift to the wrong end of the string.
-   Isolation seals each quoted value so everything inside it lays out
-   right-to-left as one unit, whatever mix of scripts and punctuation it holds.
+   Set in script.js rather than here (see jsonRtlMode): CodeMirror has to know
+   the layout to map clicks, the caret and selections onto it, and it only
+   learns about direction and isolated runs that it applies itself.
    --------------------------------------------------------------------------- */
-#jsonEditor {
-    direction: ltr;
-    text-align: left;
-}
 
-#jsonEditor.rtl,
-#jsonEditor.rtl .CodeMirror-code,
-#jsonEditor.rtl .CodeMirror-line {
+/* The plain <textarea> the editor falls back to when CodeMirror is missing:
+   it can flip direction, though without per-string isolation. */
+textarea#jsonEditor.rtl {
     direction: rtl;
     text-align: right;
-}
-
-/* Keys are tagged class="cm-string cm-property", so both selectors are needed
-   to cover values and keys without one masking the other. */
-#jsonEditor.rtl .cm-string,
-#jsonEditor.rtl .cm-property {
-    direction: rtl;
-    unicode-bidi: isolate;
 }
 
 /* Show only the icon for the direction you can switch to */
@@ -1080,18 +1054,18 @@ body.is-resizing canvas {
 }
 /* Scrollbars (WebKit) - keep them unobtrusive and theme-aware */
 .canvas-area::-webkit-scrollbar,
-#jsonEditor::-webkit-scrollbar {
+#jsonEditor .cm-scroller::-webkit-scrollbar {
     width: 10px;
     height: 10px;
 }
 
 .canvas-area::-webkit-scrollbar-track,
-#jsonEditor::-webkit-scrollbar-track {
+#jsonEditor .cm-scroller::-webkit-scrollbar-track {
     background: transparent;
 }
 
 .canvas-area::-webkit-scrollbar-thumb,
-#jsonEditor::-webkit-scrollbar-thumb {
+#jsonEditor .cm-scroller::-webkit-scrollbar-thumb {
     background: var(--border-color);
     border-radius: 5px;
     border: 2px solid transparent;
@@ -1099,14 +1073,14 @@ body.is-resizing canvas {
 }
 
 .canvas-area::-webkit-scrollbar-thumb:hover,
-#jsonEditor::-webkit-scrollbar-thumb:hover {
+#jsonEditor .cm-scroller::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
     background-clip: content-box;
 }
 
 /* Firefox */
 .canvas-area,
-#jsonEditor {
+#jsonEditor .cm-scroller {
     scrollbar-width: thin;
     scrollbar-color: var(--border-color) transparent;
 }
