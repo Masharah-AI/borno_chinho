@@ -73,7 +73,7 @@ Annotations are a JSON array of objects. Required keys depend on the category:
 ```
 
 - `bbox` — `[x1, y1, x2, y2]`, positive integers with `x1 < x2` and `y1 < y2`
-- `category` — one of `Picture`, `Title`, `Page-header`, `Section-header`, `Text`, `List-item`, `Table`, `Caption`, `Footnote`, `Page-footer`
+- `category` — one of `Picture`, `Title`, `Page-header`, `Section-header`, `Text`, `List-item`, `Table`, `Caption`, `Footnote`, `Page-footer`, `Page-number`
 - `text` — required for every category except `Picture`
 
 Categories, expected font sizes, and allowed CSS styles are configurable in [config.py](config.py).

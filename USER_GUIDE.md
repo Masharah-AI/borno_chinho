@@ -111,7 +111,7 @@ The editor is plain text, so you can fix anything by hand. The status bar tells 
 - **Sakkal Majalla**, **Simplified Arabic**, **Traditional Arabic**, and **KFGQPC HAFS Uthmanic Script** cannot be downloaded, so they only work on a computer where they are installed. Where one is missing, the menu shows it greyed out as *Not installed*. On Linux, copy the font files into `~/.local/share/fonts/`, run `fc-cache -f`, and restart the browser.
   - Sakkal Majalla, Simplified Arabic, and Traditional Arabic come with Windows: `majalla.ttf` and `majallab.ttf`, `simpo.ttf` and `simpbdo.ttf`, `trado.ttf` and `tradbdo.ttf`.
   - KFGQPC HAFS Uthmanic Script is free from the King Fahd Glorious Qur'an Printing Complex (`UthmanicHafs_V22.ttf`). Older versions, which call the font *KFGQPC Uthmanic Script HAFS*, are not recognised.
-- Sakkal Majalla draws about 30% smaller than the other Arabic fonts at the same size, so the editor shows it enlarged by 30% to match them.
+- Sakkal Majalla and Traditional Arabic draw about 30% smaller than the other Arabic fonts at the same size, so the editor shows them enlarged by 30% to match.
 - Noto Nastaliq Urdu makes lines taller than the other fonts do.
 - On a narrow JSON pane the font's name is shortened, and on a very narrow one the button shows only the **T** — hover over it to see the name.
 
@@ -119,7 +119,7 @@ The editor is plain text, so you can fix anything by hand. The status bar tells 
 
 Drag on the image to draw a rectangle — while **Show Boxes** is on, start the drag outside every box. Very small drags (under a few pixels) are ignored so a stray click does not create a box. The new rectangle is selected automatically and its coordinates appear in the **Selected Rectangle** panel.
 
-- `Delete` or `Backspace` removes the selected rectangle.
+- `Delete` removes the selected rectangle.
 - The **trash** button clears all drawn rectangles, after a confirmation.
 
 > **Note:** Drawn rectangles live in the image pane and are all created with the category `text`. They are a measuring aid for reading off coordinates — they are not written into the JSON file by Save. To add an annotation to the file, read the coordinates from the Selected Rectangle panel and type the entry into the editor.
@@ -132,7 +132,7 @@ If problems are found, a dialog lists each one with the offending entry. Validat
 
 - **Schema** — exactly the required keys for the category, no missing or extra ones (`Picture` needs `bbox` and `category`; everything else also needs `text`)
 - **Category** — must be one of the eleven known categories
-- **Bounding box** — all coordinates positive, with `x1 < x2` and `y1 < y2`
+- **Bounding box** — four whole numbers, all positive, with `x1 < x2` and `y1 < y2`
 
 Fix the entries the dialog names, then save again. On success the button briefly turns green and reads *Saved!*
 
@@ -145,7 +145,7 @@ Where the file goes depends on how it was loaded: a mounted file is **overwritte
 | `Ctrl`+`H` | Open find & replace |
 | `Ctrl`+`+` / `Ctrl`+`-` | Zoom the image in / out |
 | `Ctrl`+`0` | Reset image zoom |
-| `Delete` / `Backspace` | Delete the selected rectangle |
+| `Delete` | Delete the selected rectangle |
 | `Escape` | Close a dialog, or deselect the box being edited |
 | `←` / `→` | Resize the panes (when the divider has focus) |
 | `Home` | Reset the split (when the divider has focus) |

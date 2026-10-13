@@ -394,7 +394,10 @@ body {
 .right-sidebar {
     width: var(--panel-width);
     flex: 0 0 auto;
-    min-width: 280px;
+    /* The narrowest the JSON header fits in with the page navigator showing
+       and every label it can drop gone; any narrower and Save is pushed out
+       of the pane. */
+    min-width: 390px;
     max-width: 75%;
     background: var(--bg-secondary);
     border-left: 1px solid var(--border-color);
@@ -1011,13 +1014,19 @@ textarea#jsonEditor.rtl {
    inside the panel even at its narrowest.
    --------------------------------------------------------------------------- */
 
-/* Sakkal Majalla draws about 30% smaller than the other Arabic fonts at the
-   same size (alef height and line width, measured against Noto Naskh Arabic,
-   Noto Sans Arabic and Amiri), so it is used through this enlarged alias.
-   local() only: the font is never downloaded. */
+/* Sakkal Majalla and Traditional Arabic draw about 30% smaller than the other
+   Arabic fonts at the same size (alef height and line width, measured against
+   Noto Naskh Arabic, Noto Sans Arabic and Amiri), so they are used through
+   these enlarged aliases. local() only: the fonts are never downloaded. */
 @font-face {
     font-family: 'Sakkal Majalla Enlarged';
     src: local('Sakkal Majalla'), local('SakkalMajalla');
+    size-adjust: 130%;
+}
+
+@font-face {
+    font-family: 'Traditional Arabic Enlarged';
+    src: local('Traditional Arabic'), local('TraditionalArabic');
     size-adjust: 130%;
 }
 

@@ -5,8 +5,8 @@
 // land on the text as drawn (see jsonRtlMode). The rest of the app predates
 // CodeMirror and talks to the editor as if it were the original <textarea>,
 // so this returns a shim exposing the same surface: .value, .load(),
-// .setSelectionRange(), .focus(), .style.fontSize, .classList and
-// addEventListener('input' | 'cursoractivity', ...).
+// .setSelectionRange(), .selectionStart/.selectionEnd, .focus(),
+// .style.fontSize, .classList and addEventListener('input' | 'cursoractivity', ...).
 //
 // If CodeMirror fails to load the shim degrades to the real <textarea>, which
 // keeps the app fully usable minus the RTL isolation, the cursor -> box
@@ -151,6 +151,9 @@ function createJsonEditor(textarea) {
             jsonCM.dispatch({ selection: { anchor: start, head: end }, scrollIntoView: true });
         },
 
+        get selectionStart() { return jsonCM.state.selection.main.from; },
+        get selectionEnd() { return jsonCM.state.selection.main.to; },
+
         addEventListener(type, handler) {
             if (type === 'input') inputHandlers.push(handler);
             else if (type === 'cursoractivity') cursorHandlers.push(handler);
@@ -232,10 +235,13 @@ function findJsonStringIsolates(view) {
 }
 
 const jsonRtlMode = haveCodeMirror ? [
-    CM.EditorView.contentAttributes.of({ dir: 'rtl' }),
+    // On the root, not just the content, so the scroller is right to left too
+    // and puts its scrollbar on the left. CodeMirror assumes it is there when
+    // the text runs right to left; with the scrollbar on the right, the caret
+    // and selections were drawn a scrollbar's width left of the text.
     // CodeMirror rewrites its root element's class list on every update, so
     // the `rtl` marker has to come through it to stick.
-    CM.EditorView.editorAttributes.of({ class: 'rtl' }),
+    CM.EditorView.editorAttributes.of({ class: 'rtl', dir: 'rtl' }),
     CM.ViewPlugin.fromClass(class {
         constructor(view) {
             this.isolates = findJsonStringIsolates(view);
@@ -326,6 +332,10 @@ let currentJsonFile = null;
 // in place. Null when the browser lacks the File System Access API and the
 // hidden file input was used instead.
 let loadedJsonHandle = null;
+// True while the editor shows a page of the mounted annotation folder, false
+// once Load replaces it with a file of its own, so Save writes back to the
+// file actually showing rather than to the page the pager is on.
+let jsonFromMountedPage = false;
 let selectedAnnotation = null;
 let currentCategory = 'text';
 // JSON editor zoom state
@@ -406,6 +416,7 @@ async function displayJSONFile(file) {
 
     const data = await response.json();
     currentJsonFile = data.name || file.name;
+    jsonFromMountedPage = false;
     // A selection points into the old file's entries.
     clearBoxSelection();
     loadJsonText(JSON.stringify(data.content, null, 2));
@@ -1649,10 +1660,9 @@ function triggerSaveDialog() {
 }
 
 // The handle for the JSON file currently shown in the editor, or null when it
-// arrived through the plain file input (which yields no handle). A mounted
-// folder wins, since the pager is then what drives the editor's contents.
+// arrived through the plain file input (which yields no handle).
 function currentJsonHandle() {
-    if (mounted) {
+    if (mounted && jsonFromMountedPage) {
         const page = mounted.pages[jsonIndex];
         if (page && page.annotation) return page.annotation;
     }
@@ -1689,6 +1699,11 @@ async function writeToMountedFile() {
     }
     return 'written';
 }
+
+// The "Saved!" confirmation: its pending reset, and the button it replaced.
+let saveFeedbackTimer = null;
+let saveBtnIdleHTML = '';
+
 async function saveJSON() {
     let jsonData;
     try {
@@ -1726,14 +1741,18 @@ async function saveJSON() {
             // show quick saved feedback
             const saveBtn = document.getElementById('saveJsonBtn');
             if (saveBtn) {
-                const originalHTML = saveBtn.innerHTML;
+                // A save during the feedback restarts it; the button's own
+                // contents are only captured while it is not showing "Saved!".
+                if (saveFeedbackTimer === null) saveBtnIdleHTML = saveBtn.innerHTML;
+                else clearTimeout(saveFeedbackTimer);
                 // Wrapped like the label it replaces, which a crowded header hides.
                 saveBtn.innerHTML = '<i data-lucide="check"></i> <span class="small-btn-label">Saved!</span>';
                 saveBtn.style.background = 'var(--success-solid)';
                 saveBtn.style.color = '#ffffff';
                 if (typeof lucide !== 'undefined') lucide.createIcons();
-                setTimeout(() => {
-                    saveBtn.innerHTML = originalHTML;
+                saveFeedbackTimer = setTimeout(() => {
+                    saveFeedbackTimer = null;
+                    saveBtn.innerHTML = saveBtnIdleHTML;
                     saveBtn.style.background = '';
                     saveBtn.style.color = '';
                     if (typeof lucide !== 'undefined') lucide.createIcons();
@@ -1981,64 +2000,79 @@ function updateFindCounter() {
     }
     
     const matches = findMatches(findInput);
-    counter.textContent = matches.length > 0 ? `${findIndex + 1} of ${matches.length}` : 'No matches';
+    counter.textContent = matches.length > 0
+        ? `${Math.min(findIndex, matches.length - 1) + 1} of ${matches.length}`
+        : 'No matches';
 }
 
+// Selects match `index` and shows its number in the counter.
+function selectMatch(matches, index, length) {
+    findIndex = index;
+    jsonEditor.setSelectionRange(matches[index], matches[index] + length);
+    jsonEditor.focus();
+    updateFindCounter();
+}
+
+// Next and Previous move on from the editor's selection rather than from a
+// remembered position, so they start where the cursor is and stay right when
+// the text changes under the bar (an edit, a replace, another page).
 function findNext() {
     const findInput = document.getElementById('findInput').value;
     if (!findInput) return;
-    
+
     const matches = findMatches(findInput);
     if (matches.length === 0) return;
-    
-    findIndex = (findIndex + 1) % matches.length;
-    const start = matches[findIndex];
-    
-    jsonEditor.setSelectionRange(start, start + findInput.length);
-    jsonEditor.focus();
-    updateFindCounter();
+
+    const from = jsonEditor.selectionEnd;
+    const index = matches.findIndex(function (start) { return start >= from; });
+    selectMatch(matches, index < 0 ? 0 : index, findInput.length);
 }
 
 function findPrev() {
     const findInput = document.getElementById('findInput').value;
     if (!findInput) return;
-    
+
     const matches = findMatches(findInput);
     if (matches.length === 0) return;
-    
-    findIndex = (findIndex - 1 + matches.length) % matches.length;
-    const start = matches[findIndex];
-    
-    jsonEditor.setSelectionRange(start, start + findInput.length);
-    jsonEditor.focus();
-    updateFindCounter();
+
+    const to = jsonEditor.selectionStart;
+    let index = matches.length - 1;
+    while (index >= 0 && matches[index] >= to) index--;
+    selectMatch(matches, index < 0 ? matches.length - 1 : index, findInput.length);
 }
 
+// Replaces the match the selection covers and moves on to the next. With no
+// match selected it only finds the next one, so nothing is replaced unseen.
 function replaceOne() {
     const findInput = document.getElementById('findInput').value;
     const replaceInput = document.getElementById('replaceInput').value;
-    
+
     if (!findInput) return;
-    
-    const matches = findMatches(findInput);
-    if (matches.length === 0) return;
-    
-    const start = matches[findIndex];
-    const before = jsonEditor.value.substring(0, start);
-    const after = jsonEditor.value.substring(start + findInput.length);
-    
-    jsonEditor.value = before + replaceInput + after;
-    updateFindCounter();
-    findNext();
+
+    const text = jsonEditor.value;
+    const start = jsonEditor.selectionStart;
+    if (jsonEditor.selectionEnd !== start + findInput.length
+            || text.slice(start, start + findInput.length) !== findInput) {
+        findNext();
+        return;
+    }
+
+    jsonEditor.value = text.slice(0, start) + replaceInput + text.slice(start + findInput.length);
+    const after = start + replaceInput.length;
+    jsonEditor.setSelectionRange(after, after);
+    if (findMatches(findInput).length > 0) findNext();
+    else updateFindCounter();
 }
 
 function replaceAll() {
     const findInput = document.getElementById('findInput').value;
     const replaceInput = document.getElementById('replaceInput').value;
-    
+
     if (!findInput) return;
-    
-    jsonEditor.value = jsonEditor.value.replaceAll(findInput, replaceInput);
+
+    // split/join rather than replaceAll(), which reads "$&" or "$1" in the
+    // replacement as a pattern instead of text to insert.
+    jsonEditor.value = jsonEditor.value.split(findInput).join(replaceInput);
     findIndex = 0;
     updateFindCounter();
 }
@@ -2292,10 +2326,11 @@ const JSON_FONTS = [
     { id: 'scheherazade-new', label: 'Scheherazade New', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
     { id: 'noto-nastaliq-urdu', label: 'Noto Nastaliq Urdu', group: 'Arabic & Urdu', generic: 'serif', source: 'google' },
     // Ship with Windows and may not be redistributed, so they are never
-    // fetched. Sakkal Majalla draws small for its size, so it is used enlarged.
+    // fetched. Sakkal Majalla and Traditional Arabic draw small for their size,
+    // so they are used enlarged.
     { id: 'sakkal-majalla', label: 'Sakkal Majalla', group: 'Arabic & Urdu', generic: 'serif', source: 'installed', alias: 'Sakkal Majalla Enlarged' },
     { id: 'simplified-arabic', label: 'Simplified Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'installed' },
-    { id: 'traditional-arabic', label: 'Traditional Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'installed' },
+    { id: 'traditional-arabic', label: 'Traditional Arabic', group: 'Arabic & Urdu', generic: 'serif', source: 'installed', alias: 'Traditional Arabic Enlarged' },
     // The King Fahd Complex's Uthmanic Hafs font (version 2 and later; earlier
     // versions call it "KFGQPC Uthmanic Script HAFS"). Not on Google Fonts.
     { id: 'kfgqpc-hafs', label: 'KFGQPC HAFS Uthmanic Script', group: 'Arabic & Urdu', generic: 'serif', source: 'installed' },
@@ -2466,6 +2501,15 @@ function openJsonFontMenu() {
     menu.hidden = false;
     btn.setAttribute('aria-expanded', 'true');
 
+    // The pane clips what runs past it, so in a narrow pane, where the menu
+    // would, it opens towards the left instead.
+    menu.style.left = '';
+    const pane = menu.closest('.json-panel').getBoundingClientRect();
+    const box = menu.getBoundingClientRect();
+    if (box.right > pane.right) {
+        menu.style.left = Math.max(pane.left - box.left, pane.right - box.right) + 'px';
+    }
+
     const current = menu.querySelector('[aria-checked="true"]') || menu.querySelector('.font-menu-item');
     if (current) current.focus();
     document.addEventListener('pointerdown', onJsonFontMenuOutsidePress);
@@ -2629,7 +2673,8 @@ function isMountSupported() {
 function warnMountUnsupported() {
     alert(
         'Mounting folders needs the File System Access API.\n\n' +
-        'Use Chrome or Edge, and open the app at http://localhost:8000 ' +
+        'Use Chrome or Edge, and open the app at http://localhost' +
+        (location.port ? ':' + location.port : '') + ' ' +
         '(a LAN address such as http://192.168.x.x is not a secure context).'
     );
 }
@@ -2662,13 +2707,18 @@ async function mountImageFolder() {
         return; // dismissed
     }
     try {
-        mountedImages = await readDirectory(dir, ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif']);
-        if (mountedImages.size === 0) {
-            mountedImages = null;
+        // A folder that cannot be used leaves the one already mounted in place.
+        const found = await readDirectory(dir, ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif']);
+        if (found.size === 0) {
             alert('That folder contains no images.');
             return;
         }
-        await pairMountedFolders('image');
+        const previous = mountedImages;
+        mountedImages = found;
+        if (!await pairMountedFolders('image')) {
+            mountedImages = previous;
+            updateMountStatus();
+        }
     } catch (e) {
         alert('Could not read the image folder: ' + e.message);
     }
@@ -2683,13 +2733,18 @@ async function mountJsonFolder() {
         return; // dismissed
     }
     try {
-        mountedJson = await readDirectory(dir, ['json']);
-        if (mountedJson.size === 0) {
-            mountedJson = null;
+        // A folder that cannot be used leaves the one already mounted in place.
+        const found = await readDirectory(dir, ['json']);
+        if (found.size === 0) {
             alert('That folder contains no .json files.');
             return;
         }
-        await pairMountedFolders('json');
+        const previous = mountedJson;
+        mountedJson = found;
+        if (!await pairMountedFolders('json')) {
+            mountedJson = previous;
+            updateMountStatus();
+        }
     } catch (e) {
         alert('Could not read the annotation folder: ' + e.message);
     }
@@ -2697,7 +2752,8 @@ async function mountJsonFolder() {
 
 // Pairs whatever is currently mounted. Either folder can be mounted first, or
 // re-mounted later; `origin` is the side that just changed, so a single mounted
-// folder can still be browsed on its own.
+// folder can still be browsed on its own. False when the two folders share no
+// file names, in which case nothing changes.
 async function pairMountedFolders(origin) {
     updateMountStatus();
 
@@ -2718,7 +2774,7 @@ async function pairMountedFolders(origin) {
         jsonIndex = 0;
         showPagers();
         if (isImages) await showImageAt(0); else await showJsonAt(0);
-        return;
+        return true;
     }
 
     // Both mounted: pair by basename.
@@ -2738,7 +2794,7 @@ async function pairMountedFolders(origin) {
             'Image and annotation files must share the same name, e.g. ' +
             'page_0003.png and page_0003.json.'
         );
-        return;
+        return false;
     }
 
     mounted = { pages: pages };
@@ -2751,6 +2807,7 @@ async function pairMountedFolders(origin) {
     if (unmatched.length) {
         console.warn('Images without a matching .json:', unmatched);
     }
+    return true;
 }
 
 function showPagers() {
@@ -2828,6 +2885,7 @@ async function showJsonAt(index) {
     currentJsonFile = file.name;
     // The pager now owns the editor; any singly-loaded file is no longer shown.
     loadedJsonHandle = null;
+    jsonFromMountedPage = true;
     // A selection points into the old file's entries.
     clearBoxSelection();
 
