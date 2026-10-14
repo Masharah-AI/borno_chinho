@@ -41,7 +41,8 @@ CATEGORIES = [
     "Caption",
     "Footnote",
     "Page-footer",
-    "Page-number"
+    "Page-number",
+    "Sidenote"
 ]
 
 FONT_SIZES = {
